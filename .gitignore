@@ -1,0 +1,20 @@
+# Arduino / ESP32
+build/
+*.zip
+*.bin
+*.elf
+*.map
+sdkconfig
+sdkconfig.old
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Secrets (nunca subir credenciales reales)
+secrets.h
+wifi_credentials.h
