@@ -12,6 +12,116 @@
 #include <esp_rmaker_standard_types.h>
 #include <cstdlib>
 #include <cstring>
+#include <HTTPClient.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/** Versión compilada (sube este valor al publicar firmware nuevo). */
+#define REPISA_FW_VERSION "0.1.0"
+/** Mismo JSON que audio_pin_test hasta tener uno en el repo RepisaHotWheels (raw GitHub). */
+#define REPISA_FW_JSON_URL "https://raw.githubusercontent.com/WilmarC20/EsferasDelDragon-Releases/main/firmware.json"
+
+#define REPISA_RM_PARAM_VERIFICAR "ComprobarGit"
+#define REPISA_RM_PARAM_INFO "InfoActualizacion"
+#define REPISA_RM_PARAM_VERSION_LOCAL "VersionFirmware"
+
+extern Device *luz_led;
+
+static volatile bool g_repisa_git_check_busy = false;
+
+static bool repisaJsonExtractString(const String &json, const char *key, String &out) {
+   const String pat = String("\"") + key + "\"";
+   const int keyPos = json.indexOf(pat);
+   if (keyPos < 0) {
+      return false;
+   }
+   const int colon = json.indexOf(':', keyPos + pat.length());
+   if (colon < 0) {
+      return false;
+   }
+   const int q1 = json.indexOf('"', colon);
+   if (q1 < 0) {
+      return false;
+   }
+   const int q2 = json.indexOf('"', q1 + 1);
+   if (q2 < 0) {
+      return false;
+   }
+   out = json.substring(q1 + 1, q2);
+   return true;
+}
+
+static void repisaGitCheckTask(void * /*pvParameters*/) {
+   char line[256];
+
+   if (luz_led == nullptr) {
+      g_repisa_git_check_busy = false;
+      vTaskDelete(nullptr);
+      return;
+   }
+
+   if (WiFi.status() != WL_CONNECTED) {
+      snprintf(line, sizeof(line), "Sin WiFi (estado %d)", (int)WiFi.status());
+      line[sizeof(line) - 1] = '\0';
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, line);
+      g_repisa_git_check_busy = false;
+      vTaskDelete(nullptr);
+      return;
+   }
+
+   HTTPClient http;
+   http.setTimeout(20000);
+   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+   http.addHeader("User-Agent", "RepisaHotWheels/1");
+   http.begin(REPISA_FW_JSON_URL);
+   const int code = http.GET();
+   if (code != HTTP_CODE_OK) {
+      snprintf(line, sizeof(line), "HTTP %d al leer JSON", code);
+      line[sizeof(line) - 1] = '\0';
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, line);
+      http.end();
+      g_repisa_git_check_busy = false;
+      vTaskDelete(nullptr);
+      return;
+   }
+
+   const String payload = http.getString();
+   http.end();
+
+   String srvVer;
+   String url;
+   String desc;
+   String fecha;
+   if (!repisaJsonExtractString(payload, "version", srvVer) || !repisaJsonExtractString(payload, "url", url)) {
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, "JSON: falta version o url");
+      g_repisa_git_check_busy = false;
+      vTaskDelete(nullptr);
+      return;
+   }
+   (void)url; /* reservado para futura descarga OTA por URL */
+   repisaJsonExtractString(payload, "description", desc);
+   repisaJsonExtractString(payload, "date", fecha);
+   if (desc.length() > 72) {
+      desc = desc.substring(0, 72);
+   }
+
+   const bool hayNueva = (srvVer != String(REPISA_FW_VERSION));
+   const char *estado = hayNueva ? "Hay nueva" : "Al dia";
+
+   if (fecha.length() > 0 && desc.length() > 0) {
+      snprintf(line, sizeof(line), "%s | Srv:%s Loc:%s | %s | %s", estado, srvVer.c_str(), REPISA_FW_VERSION, fecha.c_str(),
+               desc.c_str());
+   } else if (desc.length() > 0) {
+      snprintf(line, sizeof(line), "%s | Srv:%s Loc:%s | %s", estado, srvVer.c_str(), REPISA_FW_VERSION, desc.c_str());
+   } else {
+      snprintf(line, sizeof(line), "%s | Srv:%s Loc:%s | URL ok", estado, srvVer.c_str(), REPISA_FW_VERSION);
+   }
+   line[sizeof(line) - 1] = '\0';
+   luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, line);
+
+   g_repisa_git_check_busy = false;
+   vTaskDelete(nullptr);
+}
 
 /* No está en los headers públicos; misma ruta que usa el broker MQTT al aplicar parámetros remotos. */
 extern "C" esp_err_t esp_rmaker_handle_set_params(char *data, size_t data_len, esp_rmaker_req_src_t src);
@@ -133,7 +243,7 @@ struct Config {
    int SensMic;
 } config;
 
-Device *luz_led = nullptr;
+Device *luz_led = nullptr; /* definición; declaración extern arriba para repisaGitCheckTask */
 
 struct AccionesIR {
    const char *titulo;
@@ -510,6 +620,28 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
          luz_led->updateAndReportParam("Escena", "Personalizado");
       }
       param->updateAndReport(val);
+   } else if (strcmp(param_name, REPISA_RM_PARAM_VERIFICAR) == 0) {
+      bool disparar = false;
+      if (val.type == RMAKER_VAL_TYPE_BOOLEAN) {
+         disparar = val.val.b;
+      } else if (val.type == RMAKER_VAL_TYPE_INTEGER) {
+         disparar = (val.val.i != 0);
+      }
+      param->updateAndReport(value(false));
+      if (disparar && !g_repisa_git_check_busy) {
+         g_repisa_git_check_busy = true;
+         if (luz_led) {
+            luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, "Comprobando GitHub...");
+         }
+         const BaseType_t ok =
+             xTaskCreatePinnedToCore(repisaGitCheckTask, "repisa_git_chk", 12288, nullptr, 3, nullptr, tskNO_AFFINITY);
+         if (ok != pdPASS) {
+            g_repisa_git_check_busy = false;
+            if (luz_led) {
+               luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, "Error: no se pudo iniciar la comprobacion");
+            }
+         }
+      }
    }
 }
 
@@ -578,6 +710,17 @@ void setup() {
    color_param.addBounds(value(0), value(360), value(1));
    color_param.addUIType(ESP_RMAKER_UI_HUE_CIRCLE);
 
+   Param version_firmware_param(REPISA_RM_PARAM_VERSION_LOCAL, "repisa.param.version", esp_rmaker_str(REPISA_FW_VERSION),
+                                PROP_FLAG_READ);
+   version_firmware_param.addUIType(ESP_RMAKER_UI_TEXT);
+   Param info_actualizacion_param(REPISA_RM_PARAM_INFO, "repisa.param.git_info",
+                                  esp_rmaker_str("Pulsa ComprobarGit"), PROP_FLAG_READ);
+   info_actualizacion_param.addUIType(ESP_RMAKER_UI_TEXT);
+   Param verificar_git_param(REPISA_RM_PARAM_VERIFICAR, "repisa.param.git_check", value(false),
+                             PROP_FLAG_READ | PROP_FLAG_WRITE);
+   /* push-btn-big = tarjona tipo interruptor; trigger = control compacto tipo “acción”. */
+   verificar_git_param.addUIType(ESP_RMAKER_UI_TRIGGER);
+
    luz_led = new Device("Repisa", "esp.device.light", NULL);
    luz_led->addParam(power_param);
    luz_led->addParam(scene_param);
@@ -585,6 +728,9 @@ void setup() {
    luz_led->addParam(brightness_param);
    luz_led->addParam(sens_mic_param);
    luz_led->addParam(color_param);
+   luz_led->addParam(version_firmware_param);
+   luz_led->addParam(verificar_git_param);
+   luz_led->addParam(info_actualizacion_param);
    luz_led->addCb(write_callback);
    my_node.addDevice(*luz_led);
 
@@ -627,6 +773,11 @@ void setup() {
    color_param.updateAndReport(value((int)config.Color));
    effect_param.updateAndReport(esp_rmaker_str(config.Efectos.c_str()));
    scene_param.updateAndReport(esp_rmaker_str("Personalizado"));
+   if (luz_led) {
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_VERSION_LOCAL, REPISA_FW_VERSION);
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_INFO, "Pulsa ComprobarGit");
+      luz_led->updateAndReportParam(REPISA_RM_PARAM_VERIFICAR, false);
+   }
 
    g_setup_done_ms = millis();
 }
