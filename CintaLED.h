@@ -7,9 +7,6 @@
 #include "CustomEffects.h"
 #include "config.h"
 
-#ifndef TIMER_MS
-#define TIMER_MS ((int)REPISA_CINTA_AUTO_MODE_MS)
-#endif
 
 #include <Preferences.h>
 

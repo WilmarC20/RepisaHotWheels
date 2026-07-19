@@ -10,8 +10,8 @@ public:
 
     static uint8_t getJump3();
     static uint8_t getJump7();
-    static uint8_t getFade3();
-    static uint8_t getFade7();
+    static uint8_t getHotWheelsNitro();
+    static uint8_t getTurboBoost();
     static uint8_t getSpectrum6x8();
     static uint8_t getSoundBright6x8();
     static uint8_t getSoundHue6x8();
@@ -43,8 +43,8 @@ private:
 
     static uint8_t modeJump3;
     static uint8_t modeJump7;
-    static uint8_t modeFade3;
-    static uint8_t modeFade7;
+    static uint8_t modeNitro;
+    static uint8_t modeTurbo;
     static uint8_t modeSpectrum;
     static uint8_t modeSoundBright;
     static uint8_t modeSoundHue;

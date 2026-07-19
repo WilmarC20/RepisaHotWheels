@@ -42,11 +42,7 @@ static SemaphoreHandle_t s_mic_mtx = nullptr;
 static int32_t s_shared[256];
 static volatile size_t s_shared_bytes = 0;
 
-#if REPISA_MIC_IS_C6_BUILD
 static constexpr uint32_t kMicTaskStackWords = 4096;
-#else
-static constexpr uint32_t kMicTaskStackWords = 4096;
-#endif
 
 static constexpr UBaseType_t kMicTaskPrio = 1;
 

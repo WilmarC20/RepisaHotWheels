@@ -255,8 +255,8 @@ const AccionesIR AccionIR[] PROGMEM = {
 
    {"JUMP3", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getHotWheels6x8()); }, nullptr, nullptr},
    {"RELOJ", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getJump7()); }, nullptr, nullptr},
-   {"FADE3", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getFade3()); }, nullptr, nullptr},
-   {"FADE7", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getFade7()); }, nullptr, nullptr},
+   {"NITRO", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getHotWheelsNitro()); }, nullptr, nullptr},
+   {"TURBO", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getTurboBoost()); }, nullptr, nullptr},
 
    {"M1", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getSpectrum6x8()); cinta->encender(); }, nullptr, nullptr},
    {"M2", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getSoundBright6x8()); cinta->encender(); }, nullptr, nullptr},
@@ -450,7 +450,10 @@ void sysProvEvent(arduino_event_t *sys_event) {
 
 /** Payload: servicio "Scenes"; acciones mínimas (Escena + Encender) — el firmware aplica el preset en applyEscenaPreset(). */
 static char repisa_json_escenas_rm_por_defecto[] =
-    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}}]}})";
+    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}},{"id":"musica","operation":"add","name":"Musica","action":{"Repisa":{"Encender":true,"Escena":"Musica"}}}]}})";
+
+/** Subir cuando cambie el JSON de escenas: fuerza re-siembra en equipos ya provisionados. */
+static constexpr uint8_t kRepisaRmScenesSeedVersion = 2;
 
 static void repisaLimpiarFlagEscenasRainMakerSeed() {
    prefsLock();
@@ -464,7 +467,7 @@ static void repisaLimpiarFlagEscenasRainMakerSeed() {
 static void repisaIntentarPublicarEscenasRainMakerPorDefecto() {
    prefsLock();
    prefs->begin(kRepisaRmPrefsNs, true);
-   const bool ya_enviadas = prefs->getUChar(kRepisaRmPrefScenesSeed, 0) == 1;
+   const bool ya_enviadas = prefs->getUChar(kRepisaRmPrefScenesSeed, 0) == kRepisaRmScenesSeedVersion;
    prefs->end();
    prefsUnlock();
    if (ya_enviadas) {
@@ -479,7 +482,7 @@ static void repisaIntentarPublicarEscenasRainMakerPorDefecto() {
    }
    prefsLock();
    prefs->begin(kRepisaRmPrefsNs, false);
-   prefs->putUChar(kRepisaRmPrefScenesSeed, 1);
+   prefs->putUChar(kRepisaRmPrefScenesSeed, kRepisaRmScenesSeedVersion);
    prefs->end();
    prefsUnlock();
    Serial.println(F("[Repisa] Escenas por defecto (Lectura/Fiesta/Sueño) enviadas a RainMaker."));
@@ -500,7 +503,7 @@ int valor_rm = 255;
 /** Evita marcar Escena=Personalizado mientras aplicamos un preset (evita ecos MQTT). */
 static volatile bool g_aplicando_escena = false;
 
-static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño"};
+static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño", "Musica"};
 
 /** Aplica preset de escena: modo + brillo (0–100) + color HSV + sensibilidad mic. */
 static void applyEscenaPreset(const char *nombre) {
@@ -531,6 +534,12 @@ static void applyEscenaPreset(const char *nombre) {
       brillo_pct = 12;
       hue = 8;
       sens = 25;
+   } else if (strcmp(nombre, "Musica") == 0) {
+      /* Ecualizador que reacciona a la musica; activable por voz via rutina del asistente. */
+      modo = "Spectrum6x8";
+      brillo_pct = 90;
+      hue = 275;
+      sens = 85;
    } else {
       return;
    }

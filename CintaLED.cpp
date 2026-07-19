@@ -145,7 +145,7 @@ void CintaLED::procesar() {
     if(modo_auto)
     {
       now = millis();
-      if(now - last_change > TIMER_MS) 
+      if(now - last_change > REPISA_CINTA_AUTO_MODE_MS)
       {
         modo((ws2812fx->getMode() + 1) % ws2812fx->getModeCount(),true);
         Serial.printf("Modo: %d\n",modo_act);
@@ -269,18 +269,15 @@ uint16_t CintaLED::rgbToHue(uint8_t r, uint8_t g, uint8_t b)
 
 uint32_t CintaLED::color(int pos,int _modo) 
 {
-  Serial.println("color(int pos,int _modo)");
   return color(colores[color_act = pos== -1?(color_act + 1) % n_colores:pos],_modo);
 }
 
 uint32_t CintaLED::color(int r, int g, int b,int _modo) 
 {
-  Serial.println("color(int r, int g, int b,int _modo) ");
   return color(ws2812fx->Color(r, g, b),_modo);
 }
 uint32_t CintaLED::color(uint32_t color,int _modo)
 {
-    Serial.println("color(uint32_t color,int _modo)");
 
   /* Solo salir temprano si tampoco hay cambio de modo pendiente: con un efecto
      activo y el mismo color pedido, igual hay que poder pasar a _modo (p. ej. Static). */

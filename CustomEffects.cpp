@@ -27,8 +27,13 @@ uint8_t CustomEffects::mic_sens_pct = 62;
 
 uint8_t CustomEffects::modeJump3;
 uint8_t CustomEffects::modeJump7;
-uint8_t CustomEffects::modeFade3;
-uint8_t CustomEffects::modeFade7;
+uint8_t CustomEffects::modeNitro;
+uint8_t CustomEffects::modeTurbo;
+
+/* Curva compartida de barras/nivel para los efectos de audio (antes duplicada por efecto):
+ * kBarPow da forma a la respuesta (menor = mas sensible), kRatioCap limita el techo del ratio. */
+static constexpr float kBarPow = 0.74f;
+static constexpr float kRatioCap = 1.55f;
 uint8_t CustomEffects::modeSpectrum;
 uint8_t CustomEffects::modeSoundBright;
 uint8_t CustomEffects::modeSoundHue;
@@ -42,8 +47,8 @@ void CustomEffects::begin(WS2812FX* fx) {
 
     /* Mismos nombres que antes en CintaLED para la lista / RainMaker. */
     modeJump7 = _fx->setCustomMode(F("Reloj"), jump7);
-    modeFade3 = _fx->setCustomMode(F("HotWheelsNitro"), hotWheelsNitro);
-    modeFade7 = _fx->setCustomMode(F("TurboBoost"), turboBoost);
+    modeNitro = _fx->setCustomMode(F("HotWheelsNitro"), hotWheelsNitro);
+    modeTurbo = _fx->setCustomMode(F("TurboBoost"), turboBoost);
     modeSpectrum = _fx->setCustomMode(F("Spectrum6x8"), spectrumVertical);
     modeSoundBright = _fx->setCustomMode(F("AudioFire"), audioFire);
     modeSoundHue = _fx->setCustomMode(F("SonidoColor"), vuMeterFull);
@@ -145,8 +150,8 @@ static inline uint8_t af_rand8() {
 
 uint8_t CustomEffects::getJump3() { return modeJump3; }
 uint8_t CustomEffects::getJump7() { return modeJump7; }
-uint8_t CustomEffects::getFade3() { return modeFade3; }
-uint8_t CustomEffects::getFade7() { return modeFade7; }
+uint8_t CustomEffects::getHotWheelsNitro() { return modeNitro; }
+uint8_t CustomEffects::getTurboBoost() { return modeTurbo; }
 uint8_t CustomEffects::getSpectrum6x8() { return modeSpectrum; }
 uint8_t CustomEffects::getSoundBright6x8() { return modeSoundBright; }
 uint8_t CustomEffects::getSoundHue6x8() { return modeSoundHue; }
@@ -995,8 +1000,6 @@ uint16_t CustomEffects::turboBoost() {
         turbo_inited = 1;
     }
 
-    static constexpr float kBarPow = 0.74f;
-    static constexpr float kRatioCap = 1.55f;
     static constexpr float kThrFire = 0.34f;
     static constexpr float kThrArm = 0.22f;
     static constexpr float kShotSpeed = 1.75f;
@@ -1176,8 +1179,6 @@ uint16_t CustomEffects::hotWheelsNitro() {
     static float beat_env = 0.f;
     static float hue_kick = 0.f;
 
-    static constexpr float kBarPow = 0.74f;
-    static constexpr float kRatioCap = 1.55f;
     static constexpr float kBassPow = 0.52f;
     static constexpr float kAttack = 0.92f;
     static constexpr float kDecay = 0.52f;
@@ -1390,8 +1391,6 @@ uint16_t CustomEffects::spectrumVertical() {
     /* Suavizado de entrada (EMA) para transiciones limpias a ~60 fps. α alto = más reactivo. */
     static constexpr float kEmaAlpha = 0.54f;
     /* Mapeo del ratio a altura: exponente más bajo = más altura útil con ratio < 1. */
-    static constexpr float kBarPow = 0.74f;
-    static constexpr float kRatioCap = 1.55f;
     /* Dinámica de la barra principal. */
     static constexpr float kAttack = 0.82f;     // subida proporcional al gap
     static constexpr float kDecay = 0.16f;      // bajada proporcional
@@ -1527,8 +1526,6 @@ uint16_t CustomEffects::audioFire() {
         }
         const float norm_v =
             fmaxf(fmaxf(env_agc, mpeak_b * 0.90f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
-        static constexpr float kBarPow = 0.74f;
-        static constexpr float kRatioCap = 1.55f;
         /* Bajos = promedio de las 3 bandas graves con el mismo mapeo que las barras del espectro. */
         float bass_mix = 0.f;
         for (int c = 0; c < 3; c++) {
@@ -1654,8 +1651,6 @@ uint16_t CustomEffects::vuMeterFull() {
     static float peak_val = 0.f;
     static uint32_t peak_last_rise_ms = 0;
 
-    static constexpr float kBarPow = 0.74f;
-    static constexpr float kRatioCap = 1.55f;
     static constexpr uint32_t kPeakHoldMs = 125UL;
 
     float target = 0.f;
@@ -1823,16 +1818,14 @@ uint16_t CustomEffects::impactShow() {
         const float norm = g_mic_fft_peak_env;
         const float norm_vu =
             fmaxf(fmaxf(norm, mmax_out * 0.92f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
-        static constexpr float kBarPowVu = 0.74f;
-        static constexpr float kRatioCapVu = 1.55f;
         float lr = norm_vu > 1e-8f ? (mmax_out / norm_vu) : 0.f;
         if (lr < 0.f) {
             lr = 0.f;
         }
-        if (lr > kRatioCapVu) {
-            lr = kRatioCapVu;
+        if (lr > kRatioCap) {
+            lr = kRatioCap;
         }
-        const float level_drive = powf(lr, kBarPowVu);
+        const float level_drive = powf(lr, kBarPow);
         const float noise_floor = 0.022f + (1.f - p) * 0.055f;
         if (level_drive > noise_floor) {
             const float head = 1.f - noise_floor;
