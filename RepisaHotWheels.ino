@@ -631,7 +631,10 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
          hue_rm = 360;
       }
       uint32_t color = cinta->ws2812fx->ColorHSV(hue_rm * 182, REPISA_COLOR_SATURATION_BYTE, valor_rm);
-      cinta->color(color);
+      /* Igual que los botones de color del IR: forzar Static, si no el efecto activo
+       * pisa el color en cada frame y el cambio no se ve. */
+      cinta->setReaccionSonido(false);
+      cinta->color(color, FX_MODE_STATIC);
       if (!g_aplicando_escena && luz_led) {
          luz_led->updateAndReportParam("Escena", "Personalizado");
       }

@@ -282,7 +282,9 @@ uint32_t CintaLED::color(uint32_t color,int _modo)
 {
     Serial.println("color(uint32_t color,int _modo)");
 
-  if(color == ws2812fx->getColor())
+  /* Solo salir temprano si tampoco hay cambio de modo pendiente: con un efecto
+     activo y el mismo color pedido, igual hay que poder pasar a _modo (p. ej. Static). */
+  if(color == ws2812fx->getColor() && (_modo == -1 || ws2812fx->getMode() == (uint8_t)_modo))
     return color;
   ws2812fx->setColor(color);
   ws2812fx->service();
