@@ -450,10 +450,10 @@ void sysProvEvent(arduino_event_t *sys_event) {
 
 /** Payload: servicio "Scenes"; acciones mínimas (Escena + Encender) — el firmware aplica el preset en applyEscenaPreset(). */
 static char repisa_json_escenas_rm_por_defecto[] =
-    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}},{"id":"musica","operation":"add","name":"Musica","action":{"Repisa":{"Encender":true,"Escena":"Musica"}}}]}})";
+    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}},{"id":"musica","operation":"add","name":"Musica","action":{"Repisa":{"Encender":true,"Escena":"Musica"}}},{"id":"sergio","operation":"add","name":"Sergio","action":{"Repisa":{"Encender":true,"Escena":"Sergio"}}},{"id":"hora","operation":"add","name":"Hora","action":{"Repisa":{"Encender":true,"Escena":"Hora"}}}]}})";
 
 /** Subir cuando cambie el JSON de escenas: fuerza re-siembra en equipos ya provisionados. */
-static constexpr uint8_t kRepisaRmScenesSeedVersion = 2;
+static constexpr uint8_t kRepisaRmScenesSeedVersion = 3;
 
 static void repisaLimpiarFlagEscenasRainMakerSeed() {
    prefsLock();
@@ -503,7 +503,7 @@ int valor_rm = 255;
 /** Evita marcar Escena=Personalizado mientras aplicamos un preset (evita ecos MQTT). */
 static volatile bool g_aplicando_escena = false;
 
-static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño", "Musica"};
+static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño", "Musica", "Sergio", "Hora"};
 
 /** Aplica preset de escena: modo + brillo (0–100) + color HSV + sensibilidad mic. */
 static void applyEscenaPreset(const char *nombre) {
@@ -540,6 +540,18 @@ static void applyEscenaPreset(const char *nombre) {
       brillo_pct = 90;
       hue = 275;
       sens = 85;
+   } else if (strcmp(nombre, "Sergio") == 0) {
+      /* Letrero desplazante con el nombre (efecto HotWheels). */
+      modo = "HotWheels";
+      brillo_pct = 85;
+      hue = 0;
+      sens = 40;
+   } else if (strcmp(nombre, "Hora") == 0) {
+      /* Reloj 6x8 con hora local (NTP via servicio TZ de RainMaker). */
+      modo = "Reloj";
+      brillo_pct = 60;
+      hue = 200;
+      sens = 40;
    } else {
       return;
    }
