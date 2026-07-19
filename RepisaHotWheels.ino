@@ -192,6 +192,24 @@ const char *service_name = REPISA_PROVISION_SERVICE_NAME;
 const char *pop = REPISA_PROVISION_POP;
 
 Preferences *prefs = nullptr;
+
+/* `prefs` se usa desde loop(), el callback de RainMaker y el event loop de esp_event
+ * (tareas distintas); sin mutex, un begin() puede pisar el handle de otro en curso.
+ * Se crea en setup() antes de que exista cualquier otra tarea. */
+static SemaphoreHandle_t s_prefs_mutex = nullptr;
+static void prefsLock() {
+   if (s_prefs_mutex == nullptr) {
+      s_prefs_mutex = xSemaphoreCreateMutex();
+   }
+   xSemaphoreTake(s_prefs_mutex, portMAX_DELAY);
+   if (prefs == nullptr) {
+      prefs = new Preferences();
+   }
+}
+static void prefsUnlock() {
+   xSemaphoreGive(s_prefs_mutex);
+}
+
 IRControlLite *irControl = nullptr;
 CintaLED *cinta = nullptr;
 
@@ -251,9 +269,7 @@ const AccionesIR AccionIR[] PROGMEM = {
 int numOpcionesControl = sizeof(AccionIR) / sizeof(AccionIR[0]);
 
 void LeerConfig() {
-   if (prefs == nullptr) {
-      prefs = new Preferences();
-   }
+   prefsLock();
    prefs->begin("config", true);
    config.Brillo = 255;
    config.Color = prefs->getInt("Color", 13529899);
@@ -261,22 +277,72 @@ void LeerConfig() {
    config.Encender = prefs->getBool("Encender", false);
    config.SensMic = prefs->getInt("SensMic", 62);
    prefs->end();
+   prefsUnlock();
+}
+
+/* Debounce de NVS: los cambios se acumulan en `config` (bajo el mutex de prefs) y se
+ * escriben todos juntos tras REPISA_NVS_SAVE_DEBOUNCE_MS sin cambios nuevos. Antes,
+ * arrastrar un slider en la app generaba una escritura de flash por cada valor. */
+static volatile bool s_config_pendiente = false;
+static uint32_t s_config_ultimo_cambio_ms = 0;
+
+static void marcarConfigPendiente() {
+   s_config_ultimo_cambio_ms = millis();
+   s_config_pendiente = true;
 }
 
 void GuardarConfigInt(String label, int valor) {
-   prefs->begin("config", false);
-   prefs->putInt(label.c_str(), valor);
-   prefs->end();
+   prefsLock();
+   if (label == "Color") {
+      config.Color = (uint32_t)valor;
+   } else if (label == "Brillo") {
+      config.Brillo = valor;
+   } else if (label == "SensMic") {
+      config.SensMic = valor;
+   }
+   marcarConfigPendiente();
+   prefsUnlock();
 }
 void GuardarConfigStr(String label, String valor) {
-   prefs->begin("config", false);
-   prefs->putString(label.c_str(), valor.c_str());
-   prefs->end();
+   prefsLock();
+   if (label == "Efectos") {
+      config.Efectos = valor;
+   }
+   marcarConfigPendiente();
+   prefsUnlock();
 }
 void GuardarConfigBool(String label, bool valor) {
+   prefsLock();
+   if (label == "Encender") {
+      config.Encender = valor;
+   }
+   marcarConfigPendiente();
+   prefsUnlock();
+}
+
+/** Escribe YA la config pendiente sin esperar el debounce (usar antes de un reinicio). */
+void repisaFlushConfigAhora() {
+   if (!s_config_pendiente) {
+      return;
+   }
+   prefsLock();
+   s_config_pendiente = false;
    prefs->begin("config", false);
-   prefs->putBool(label.c_str(), valor);
+   prefs->putInt("Color", (int)config.Color);
+   prefs->putInt("Brillo", config.Brillo);
+   prefs->putInt("SensMic", config.SensMic);
+   prefs->putString("Efectos", config.Efectos.c_str());
+   prefs->putBool("Encender", config.Encender);
    prefs->end();
+   prefsUnlock();
+}
+
+/** Llamar desde loop(): escribe la config a NVS si hay cambios y ya pasó el debounce. */
+void repisaFlushConfigSiPendiente() {
+   if (!s_config_pendiente || (millis() - s_config_ultimo_cambio_ms) < REPISA_NVS_SAVE_DEBOUNCE_MS) {
+      return;
+   }
+   repisaFlushConfigAhora();
 }
 
 /** Cada encendido “físico” suma 1; si llega a REPISA_FACTORY_RESET_POWER_CYCLES → RMakerFactoryReset.
@@ -292,9 +358,7 @@ static void repisaEvaluarResetPorCiclosAlimentacion() {
    if (!esEncendidoPorCorriente) {
       return;
    }
-   if (prefs == nullptr) {
-      prefs = new Preferences();
-   }
+   prefsLock();
    prefs->begin("hw_rst", false);
    unsigned seq = (unsigned)prefs->getUChar("pwrcyc", 0) + 1U;
    if (seq > 250U) {
@@ -302,6 +366,7 @@ static void repisaEvaluarResetPorCiclosAlimentacion() {
    }
    prefs->putUChar("pwrcyc", (uint8_t)seq);
    prefs->end();
+   prefsUnlock();
 
    Serial.printf(
        "[Repisa] Ciclo rapido de alimentacion: %u de %u "
@@ -311,9 +376,11 @@ static void repisaEvaluarResetPorCiclosAlimentacion() {
        (unsigned long)(REPISA_FACTORY_CANCEL_STABLE_MS / 1000UL));
 
    if (seq >= (unsigned)REPISA_FACTORY_RESET_POWER_CYCLES) {
+      prefsLock();
       prefs->begin("hw_rst", false);
       prefs->putUChar("pwrcyc", 0);
       prefs->end();
+      prefsUnlock();
       Serial.println("[Repisa] Aplicando reinicio de fabrica RainMaker...");
       Serial.flush();
       delay(800);
@@ -328,12 +395,11 @@ static void repisaCancelarContadorSiEncendidoEstable() {
       return;
    }
    hecho = true;
-   if (prefs == nullptr) {
-      prefs = new Preferences();
-   }
+   prefsLock();
    prefs->begin("hw_rst", false);
    prefs->putUChar("pwrcyc", 0);
    prefs->end();
+   prefsUnlock();
 }
 
 void sysProvEvent(arduino_event_t *sys_event) {
@@ -387,22 +453,20 @@ static char repisa_json_escenas_rm_por_defecto[] =
     R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}}]}})";
 
 static void repisaLimpiarFlagEscenasRainMakerSeed() {
-   if (prefs == nullptr) {
-      prefs = new Preferences();
-   }
+   prefsLock();
    prefs->begin(kRepisaRmPrefsNs, false);
    prefs->remove(kRepisaRmPrefScenesSeed);
    prefs->end();
+   prefsUnlock();
 }
 
 /** Registra en la nube las escenas Lectura / Fiesta / Sueño una sola vez (luego queda en NVS). */
 static void repisaIntentarPublicarEscenasRainMakerPorDefecto() {
-   if (prefs == nullptr) {
-      prefs = new Preferences();
-   }
+   prefsLock();
    prefs->begin(kRepisaRmPrefsNs, true);
    const bool ya_enviadas = prefs->getUChar(kRepisaRmPrefScenesSeed, 0) == 1;
    prefs->end();
+   prefsUnlock();
    if (ya_enviadas) {
       return;
    }
@@ -413,9 +477,11 @@ static void repisaIntentarPublicarEscenasRainMakerPorDefecto() {
       Serial.printf("[Repisa] Escenas RM por defecto: error %d (se reintenta al reconectar MQTT)\n", (int)err);
       return;
    }
+   prefsLock();
    prefs->begin(kRepisaRmPrefsNs, false);
    prefs->putUChar(kRepisaRmPrefScenesSeed, 1);
    prefs->end();
+   prefsUnlock();
    Serial.println(F("[Repisa] Escenas por defecto (Lectura/Fiesta/Sueño) enviadas a RainMaker."));
 }
 
@@ -631,6 +697,8 @@ void CambioCintaLed(String nombre, const value_t &valor) {
 void setup() {
    Serial.begin(115200);
    delay(500);
+   /* Crear el mutex de prefs antes de que arranque cualquier otra tarea. */
+   s_prefs_mutex = xSemaphoreCreateMutex();
    repisaEvaluarResetPorCiclosAlimentacion();
 
    Serial.println();
@@ -725,7 +793,15 @@ void setup() {
 #endif
    
 
-   cinta->iniciar(config.Encender, config.Brillo, config.Color, config.Efectos.c_str());
+   /* Snapshot bajo mutex: RMaker.start() ya corre y write_callback puede mutar `config`
+    * (String no es atómico) desde la tarea de RainMaker. */
+   prefsLock();
+   const bool cfg_encender = config.Encender;
+   const int cfg_brillo = config.Brillo;
+   const uint32_t cfg_color = config.Color;
+   const String cfg_efectos = config.Efectos;
+   prefsUnlock();
+   cinta->iniciar(cfg_encender, cfg_brillo, cfg_color, cfg_efectos.c_str());
    /* IR se arranca en loop(): no en provisión activa (IRremote vs BLE/WiFi); sin exigir WiFi conectado. */
    Serial.println("[IR]ANTES IRControlLite listo (independiente de WiFi/RainMaker; fuera de ventana de provisión).");
    irControl = new IRControlLite(REPISA_IR_RECEIVE_PIN);
@@ -733,11 +809,11 @@ void setup() {
    Serial.println("[IR] IRControlLite listo (independiente de WiFi/RainMaker; fuera de ventana de provisión).");
   
    valor_rm = map(brillo_rm, 0, 100, 0, 255);
-   power_param.updateAndReport(value(config.Encender));
+   power_param.updateAndReport(value(cfg_encender));
    brightness_param.updateAndReport(value(brillo_rm));
    sens_mic_param.updateAndReport(value((int)CustomEffects::getMicSensitivityPct()));
-   color_param.updateAndReport(value((int)config.Color));
-   effect_param.updateAndReport(esp_rmaker_str(config.Efectos.c_str()));
+   color_param.updateAndReport(value((int)cfg_color));
+   effect_param.updateAndReport(esp_rmaker_str(cfg_efectos.c_str()));
    scene_param.updateAndReport(esp_rmaker_str("Personalizado"));
    if (luz_led) {
       luz_led->updateAndReportParam(REPISA_RM_PARAM_VERSION_LOCAL, REPISA_FW_VERSION);
@@ -796,6 +872,7 @@ static void procesarComandosSerialReset() {
                Serial.println("[Repisa] RM_FACTORY: reinicio fabrica RainMaker (2 s)...");
                Serial.flush();
                delay(2000);
+               repisaFlushConfigAhora();
                repisaLimpiarFlagEscenasRainMakerSeed();
                RMakerFactoryReset(2);
                return;
@@ -845,6 +922,7 @@ static void repisaProcesarBootButtonNoBloqueante() {
       }
       if (dur > 10000U) {
          Serial.println(F("Reset to factory."));
+         repisaFlushConfigAhora();
          repisaLimpiarFlagEscenasRainMakerSeed();
          RMakerFactoryReset(2);
       } else if (dur > 3000U) {
@@ -856,6 +934,7 @@ static void repisaProcesarBootButtonNoBloqueante() {
 
 void loop() {
    repisaCancelarContadorSiEncendidoEstable();
+   repisaFlushConfigSiPendiente();
    procesarComandosSerialReset();
 
 #if defined(ARDUINO_ARCH_ESP32) && REPISA_MIC_SERIAL_PLOTTER

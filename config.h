@@ -124,9 +124,13 @@
 #define REPISA_MIC_IMPACT_ENV_GAIN_I2S 0.58f
 #endif
 
-/* ---------- Provisión RainMaker (solo texto; el modo BLE/SoftAP se define en el .ino por dependencias SDK) ---------- */
-#define REPISA_PROVISION_SERVICE_NAME "PROV_1234"
-#define REPISA_PROVISION_POP "abcd1234"
+/* ---------- Provisión RainMaker (solo texto; el modo BLE/SoftAP se define en el .ino por dependencias SDK) ----------
+ * Credenciales en secrets.h (fuera de git). Primera vez: copia secrets.example.h como secrets.h. */
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Falta secrets.h: copia secrets.example.h como secrets.h y define tus credenciales de provision"
+#endif
 
 /* ---------- Cinta LED WS2812 (data + número de LEDs; orden NEO_* va en el constructor en el .ino) ---------- */
 #define REPISA_LED_DATA_PIN 4
@@ -154,12 +158,21 @@
 
 /* ---------- INMP441 I²S (ESP32) ---------- */
 #if defined(ARDUINO_ARCH_ESP32)
+#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32S3
 #define REPISA_I2S_PIN_WS 2//naranja
 #define REPISA_I2S_PIN_SD 6//verde
 #define REPISA_I2S_PIN_SCK 7//azul
+#else
+/* En ESP32 clasico los GPIO 6-11 van a la flash SPI interna: usarlos brickea el arranque. */
+#error "Define pines I2S seguros para este chip (evita GPIO 6-11 en ESP32 clasico)"
+#endif
 #endif
 
 /* ---------- Tiempos y límites ---------- */
+/** Debounce de guardado en NVS: espera este tiempo sin cambios antes de escribir flash
+ * (evita una escritura por cada paso al arrastrar un slider en la app). */
+#define REPISA_NVS_SAVE_DEBOUNCE_MS 2000U
+
 /** Mantener pulsado BOOT para reset por firmware (si se usa en otro flujo). */
 #define REPISA_RESET_HOLD_MS 5000U
 

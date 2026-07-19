@@ -18,3 +18,7 @@ Thumbs.db
 # Secrets (nunca subir credenciales reales)
 secrets.h
 wifi_credentials.h
+
+# Tooling de agentes / temporales
+.atl/
+tmp/

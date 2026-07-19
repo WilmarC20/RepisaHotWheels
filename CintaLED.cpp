@@ -194,8 +194,10 @@ int CintaLED::brillo(int brill)
 }
 int CintaLED::buscar_modo(const char* NombreModo)
 {
-  for (int i = 0; i < ws2812fx->getModeCount(); i++) 
-    if (strcmp(NombreModo, strdup_P(reinterpret_cast<const char *>(ws2812fx->getModeName(i)))) == 0) 
+  /* modos[] ya se duplicó desde PROGMEM en el constructor; no volver a strdup_P
+     aquí (cada llamada perdía un malloc por modo y fragmentaba el heap). */
+  for (int i = 0; i < n_modos; i++)
+    if (strcmp(NombreModo, modos[i]) == 0)
       return i;
   return 0;
 }
