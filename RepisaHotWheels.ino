@@ -450,10 +450,10 @@ void sysProvEvent(arduino_event_t *sys_event) {
 
 /** Payload: servicio "Scenes"; acciones mínimas (Escena + Encender) — el firmware aplica el preset en applyEscenaPreset(). */
 static char repisa_json_escenas_rm_por_defecto[] =
-    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}},{"id":"musica","operation":"remove"},{"id":"sergio","operation":"add","name":"Sergio","action":{"Repisa":{"Encender":true,"Escena":"Sergio"}}},{"id":"hora","operation":"add","name":"Hora","action":{"Repisa":{"Encender":true,"Escena":"Hora"}}}]}})";
+    R"({"Scenes":{"Scenes":[{"id":"lectura","operation":"add","name":"Lectura","action":{"Repisa":{"Encender":true,"Escena":"Lectura"}}},{"id":"fiesta","operation":"add","name":"Fiesta","action":{"Repisa":{"Encender":true,"Escena":"Fiesta"}}},{"id":"sueno","operation":"add","name":"Sueño","action":{"Repisa":{"Encender":true,"Escena":"Sueño"}}},{"id":"musica","operation":"remove"},{"id":"sergio","operation":"add","name":"Sergio","action":{"Repisa":{"Encender":true,"Escena":"Sergio"}}},{"id":"hora","operation":"add","name":"Hora","action":{"Repisa":{"Encender":true,"Escena":"Hora"}}},{"id":"fuego","operation":"add","name":"Fuego","action":{"Repisa":{"Encender":true,"Escena":"Fuego"}}}]}})";
 
 /** Subir cuando cambie el JSON de escenas: fuerza re-siembra en equipos ya provisionados. */
-static constexpr uint8_t kRepisaRmScenesSeedVersion = 4;
+static constexpr uint8_t kRepisaRmScenesSeedVersion = 5;
 
 static void repisaLimpiarFlagEscenasRainMakerSeed() {
    prefsLock();
@@ -503,7 +503,7 @@ int valor_rm = 255;
 /** Evita marcar Escena=Personalizado mientras aplicamos un preset (evita ecos MQTT). */
 static volatile bool g_aplicando_escena = false;
 
-static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño", "Sergio", "Hora"};
+static const char *kEscenaNombres[] = {"Personalizado", "Lectura", "Fiesta", "Sueño", "Sergio", "Hora", "Fuego"};
 
 /** Aplica preset de escena: modo + brillo (0–100) + color HSV + sensibilidad mic. */
 static void applyEscenaPreset(const char *nombre) {
@@ -547,6 +547,12 @@ static void applyEscenaPreset(const char *nombre) {
       brillo_pct = 60;
       hue = 200;
       sens = 40;
+   } else if (strcmp(nombre, "Fuego") == 0) {
+      /* Hoguera que crece con los graves de la musica (AudioFire). */
+      modo = "AudioFire";
+      brillo_pct = 80;
+      hue = 20;
+      sens = 75;
    } else {
       return;
    }

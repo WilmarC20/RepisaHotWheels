@@ -6,8 +6,8 @@
  */
 
 /* ---------- Firmware, OTA y parámetros RainMaker (nombres en la app) ---------- */
-#define REPISA_FW_VERSION "0.1.0"
-#define REPISA_FW_JSON_URL "https://raw.githubusercontent.com/WilmarC20/EsferasDelDragon-Releases/main/firmware.json"
+#define REPISA_FW_VERSION "0.2.0"
+#define REPISA_FW_JSON_URL "https://raw.githubusercontent.com/WilmarC20/RepisaHotWheels/main/firmware.json"
 
 #define REPISA_RM_PARAM_VERIFICAR "ComprobarGit"
 #define REPISA_RM_PARAM_INFO "InfoActualizacion"
