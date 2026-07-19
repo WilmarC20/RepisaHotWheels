@@ -1,10 +1,16 @@
 #include "CustomEffects.h"
 #include "Matrix6x8.h"
+#include "config.h"
 #include <arduinoFFT.h>
 #include <cmath>
 #include <string.h>
 #if defined(ARDUINO_ARCH_ESP32)
 #include <esp_random.h>
+#include <time.h>
+#include "RepisaMic.h"
+#define REPISA_MIC_INPUT_ACTIVE(pp) ((pp) >= 0 || (pp) == REPISA_MIC_PIN_I2S)
+#else
+#define REPISA_MIC_INPUT_ACTIVE(pp) ((pp) >= 0)
 #endif
 
 #ifndef M_PI
@@ -35,15 +41,16 @@ void CustomEffects::begin(WS2812FX* fx) {
     _fx = fx;
 
     /* Mismos nombres que antes en CintaLED para la lista / RainMaker. */
-    modeJump3 = _fx->setCustomMode(F("Jump3"), jump3);
-    modeJump7 = _fx->setCustomMode(F("Jump7"), jump7);
-    modeFade3 = _fx->setCustomMode(F("Fade3"), fade3);
-    //modeFade7 = _fx->setCustomMode(F("Fade7"), fade7);
+    modeJump7 = _fx->setCustomMode(F("Reloj"), jump7);
+    modeFade3 = _fx->setCustomMode(F("HotWheelsNitro"), hotWheelsNitro);
+    modeFade7 = _fx->setCustomMode(F("TurboBoost"), turboBoost);
     modeSpectrum = _fx->setCustomMode(F("Spectrum6x8"), spectrumVertical);
     modeSoundBright = _fx->setCustomMode(F("AudioFire"), audioFire);
     modeSoundHue = _fx->setCustomMode(F("SonidoColor"), vuMeterFull);
     modeHotWheels = _fx->setCustomMode(F("HotWheels"), hotWheelsMarquee);
     modeImpact = _fx->setCustomMode(F("Impacto"), impactShow);
+    modeJump3 = _fx->setCustomMode(F("Jump3"), jump3);
+    
 }
 
 void CustomEffects::setMicPin(int pin) {
@@ -79,6 +86,17 @@ float CustomEffects::micBrightnessEnvGain() {
 static inline float micSensNorm() {
     return (float)CustomEffects::getMicSensitivityPct() / 100.f;
 }
+
+#if defined(ARDUINO_ARCH_ESP32)
+/** Solo I²S: evita ratio mpeak/env ~ 1 en AudioFire y SonidoColor (Spectrum usa ratios por banda). */
+static inline float micGlobalVuNormStretch(int mp) {
+    return (mp == REPISA_MIC_PIN_I2S) ? REPISA_MIC_GLOBALVU_NORM_STRETCH_I2S : 1.f;
+}
+#else
+static inline float micGlobalVuNormStretch(int) {
+    return 1.f;
+}
+#endif
 
 /** Amplifica |muestra−DC| tras deadband: sube mucho con sensibilidad alta. */
 static inline float micEnvDriveScale() {
@@ -159,6 +177,301 @@ static uint8_t glyph4x8(char c, uint8_t col) {
     }
 }
 
+static uint8_t glyphClockFlipRows(uint8_t b) {
+    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+    b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+    b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+    return b;
+}
+
+/*
+ * =========================================================
+ * ASCII -> columnas binarias 4x8
+ * =========================================================
+ */
+
+static bool glyphPixelOn(char c) {
+    return (c == '#' || c == 'X' || c == '*');
+}
+
+static void buildGlyph4x8(
+    const char* rows[8],
+    uint8_t outCols[4]
+) {
+
+    /* Cada rows[i] debe ser exactamente 4 caracteres ASCII (p. ej. '#' no UTF-8 multibyte). */
+
+    for (uint8_t x = 0; x < 4; x++) {
+        outCols[x] = 0;
+    }
+
+    for (uint8_t row = 0; row < 8; row++) {
+
+        /* row 0 = línea superior del arte ASCII */
+        uint8_t fy = (uint8_t)(7 - row);
+
+        for (uint8_t col = 0; col < 4; col++) {
+
+            char ch = rows[row][col];
+
+            if (glyphPixelOn(ch)) {
+                outCols[col] |= (1u << fy);
+            }
+        }
+    }
+}
+
+/*
+ * Convierte automáticamente a formato legacy
+ * (bit0 arriba -> necesita flip)
+ */
+static void buildGlyph4x8Legacy(
+    const char* rows[8],
+    uint8_t outCols[4]
+) {
+
+    buildGlyph4x8(rows, outCols);
+
+    for (uint8_t i = 0; i < 4; i++) {
+        outCols[i] = glyphClockFlipRows(outCols[i]);
+    }
+}
+
+/*
+ * buildGlyph4x8 = bits con y=0 abajo en columna.
+ * Legacy aplica flip: en jump7 usar índice (7-y) salvo '4' y '5' (directos).
+ */
+static inline uint8_t glyphClockBitForMatrixY(char ch, uint8_t matrixY) {
+    if (ch == '4' || ch == '5') {
+        return matrixY;
+    }
+    return (uint8_t)(7u - matrixY);
+}
+
+/*
+ * =========================================================
+ * GLYPHS RELOJ
+ * =========================================================
+ */
+
+static uint8_t glyphClock4x8(char c, uint8_t col) {
+
+    if (col >= 4) {
+        return 0;
+    }
+
+    uint8_t g[4];
+
+    switch (c) {
+
+        case '0':
+        {
+            const char* rows[8] = {
+                " ## ",
+                "#  #",
+                "#  #",
+                "#  #",
+                "#  #",
+                "#  #",
+                "#  #",
+                " ## "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '1':
+        {
+            const char* rows[8] = {
+                "  # ",
+                " ## ",
+                "  # ",
+                "  # ",
+                "  # ",
+                "  # ",
+                "  # ",
+                " ###"
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '2':
+        {
+            const char* rows[8] = {
+                " ## ",
+                "#  #",
+                "   #",
+                "  # ",
+                " #  ",
+                "#   ",
+                "#   ",
+                "####"
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '3':
+        {
+            const char* rows[8] = {
+                " ## ",
+                "#  #",
+                "   #",
+                " ## ",
+                "   #",
+                "   #",
+                "#  #",
+                " ## "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '4':
+        {
+            const char* rows[8] = {
+                "#  #",
+                "#  #",
+                "#  #",
+                "####",
+                "   #",
+                "   #",
+                "   #",
+                "   #"
+            };
+
+            buildGlyph4x8(rows, g);
+            return g[col];
+        }
+
+        case '5':
+        {
+            const char* rows[8] = {
+                "####",
+                "#   ",
+                "#   ",
+                "####",
+                "   #",
+                "   #",
+                "   #",
+                "####"
+            };
+
+            buildGlyph4x8(rows, g);
+            return g[col];
+        }
+
+        case '6':
+        {
+            const char* rows[8] = {
+                "####",
+                "#   ",
+                "#   ",
+                "#   ",
+                "####",
+                "#  #",
+                "#  #",
+                "####"
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '7':
+        {
+            const char* rows[8] = {
+                "####",
+                "   #",
+                "   #",
+                "  # ",
+                "  # ",
+                " #  ",
+                " #  ",
+                " #  "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '8':
+        {
+            const char* rows[8] = {
+                " ## ",
+                "#  #",
+                "#  #",
+                " ## ",
+                "#  #",
+                "#  #",
+                "#  #",
+                " ## "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '9':
+        {
+            const char* rows[8] = {
+                " ## ",
+                "#  #",
+                "#  #",
+                " ###",
+                "   #",
+                "   #",
+                "#  #",
+                " ## "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case ':':
+        {
+            const char* rows[8] = {
+                "    ",
+                " ## ",
+                " ## ",
+                "    ",
+                "    ",
+                " ## ",
+                " ## ",
+                "    "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        case '-':
+        {
+            const char* rows[8] = {
+                "    ",
+                "    ",
+                "    ",
+                "####",
+                "####",
+                "    ",
+                "    ",
+                "    "
+            };
+
+            buildGlyph4x8Legacy(rows, g);
+            return g[col];
+        }
+
+        default:
+            return 0;
+    }
+}
 uint16_t CustomEffects::hotWheelsMarquee() {
     if (!_fx) {
         return 50;
@@ -258,7 +571,7 @@ uint16_t CustomEffects::jump3() {
     return seg->speed;
 }
 
-// 🌈 JUMP7
+// 🕐 Reloj HH:MM — scroll; glifos solo en glyphClock4x8 (mismo criterio que letras HotWheels); azul; ciclo corto
 uint16_t CustomEffects::jump7() {
     if (!_fx) {
         return 50;
@@ -267,128 +580,79 @@ uint16_t CustomEffects::jump7() {
     if (!seg) {
         return 50;
     }
+    const uint16_t stripLen = _fx->getLength();
+    const uint16_t pin0 = (uint16_t)seg->start;
 
-    static uint8_t step = 0;
-    static unsigned long last = 0;
+    static char kMsg[16] = " --:--";
+#if !REPISA_RELOJ_FIJO_12_34
+    static unsigned long lastRefresh = 0;
+#endif
 
-    uint32_t colores[] = {
-        0xFF0000,
-        0x00FF00,
-        0x0000FF,
-        0xFFFF00,
-        0x00FFFF,
-        0xFF00FF,
-        0xFFFFFF
-    };
-
-    if (millis() - last > seg->speed) {
-        step = (step + 1) % 7;
-        last = millis();
-    }
-
-    for (uint16_t i = seg->start; i <= seg->stop; i++) {
-        _fx->setPixelColor(i, colores[step]);
-    }
-
-    return seg->speed; 
-}
-
-// 🌫️ FADE3
-uint16_t CustomEffects::fade3() {
-    if (!_fx) {
-        return 50;
-    }
-    WS2812FX::Segment* seg = _fx->getSegment();
-    if (!seg) {
-        return 50;
-    }
-
-    static float t = 0;
-    static uint8_t index = 0;
-    static unsigned long last = 0;
-
-    uint32_t colores[] = {
-        0xFF0000,
-        0x00FF00,
-        0x0000FF
-    };
-
-    if (millis() - last > 20) {
-        t += 0.02;
-
-        if (t >= 1.0) {
-            t = 0;
-            index = (index + 1) % 3;
+#if REPISA_RELOJ_FIJO_12_34
+    snprintf(kMsg, sizeof(kMsg), "%02d:%02d", 12, 34);
+#else
+    if (lastRefresh == 0 || millis() - lastRefresh >= 500) {
+        lastRefresh = millis();
+#if defined(ARDUINO_ARCH_ESP32)
+        struct tm ti;
+        if (getLocalTime(&ti)) {
+            snprintf(kMsg, sizeof(kMsg), " %02d:%02d", ti.tm_hour, ti.tm_min);
+        } else {
+            snprintf(kMsg, sizeof(kMsg), " --:--");
         }
-
-        last = millis();
+#else
+        snprintf(kMsg, sizeof(kMsg), " --:--");
+#endif
     }
+#endif
 
-    uint32_t c1 = colores[index];
-    uint32_t c2 = colores[(index + 1) % 3];
+    static constexpr int kCharStep = 6;
+    static int scrollCol = 0;
+    static uint8_t stepDiv = 0;
 
-    uint8_t r = ((c1 >> 16) & 0xFF) + (((c2 >> 16) & 0xFF) - ((c1 >> 16) & 0xFF)) * t;
-    uint8_t g = ((c1 >> 8) & 0xFF) + (((c2 >> 8) & 0xFF) - ((c1 >> 8) & 0xFF)) * t;
-    uint8_t b = (c1 & 0xFF) + ((c2 & 0xFF) - (c1 & 0xFF)) * t;
+    const int kChars = (int)strlen(kMsg);
+    const int kTotalCols = kChars * kCharStep + 3;
 
-    uint32_t color = (r << 16) | (g << 8) | b;
+    const uint32_t fg = _fx->Color(55, 160, 255);
 
-    for (uint16_t i = seg->start; i <= seg->stop; i++) {
-        _fx->setPixelColor(i, color);
-    }
-
-    return seg->speed; 
-}
-
-// 🌈 FADE7
-uint16_t CustomEffects::fade7() {
-    if (!_fx) {
-        return 50;
-    }
-    WS2812FX::Segment* seg = _fx->getSegment();
-    if (!seg) {
-        return 50;
-    }
-
-    static float t = 0;
-    static uint8_t index = 0;
-    static unsigned long last = 0;
-
-    uint32_t colores[] = {
-        0xFF0000,
-        0xFF7F00,
-        0xFFFF00,
-        0x00FF00,
-        0x0000FF,
-        0x4B0082,
-        0x9400D3
-    };
-
-    if (millis() - last > 20) {
-        t += 0.02;
-
-        if (t >= 1.0) {
-            t = 0;
-            index = (index + 1) % 7;
+    for (uint8_t x = 0; x < Matrix6x8::W; x++) {
+        const int worldCol = scrollCol + x;
+        const int charIdx = worldCol / kCharStep;
+        const int inChar = worldCol % kCharStep;
+        uint8_t bits = 0;
+        if (charIdx >= 0 && charIdx < kChars && inChar < 4) {
+            bits = glyphClock4x8(kMsg[charIdx], (uint8_t)inChar);
         }
-
-        last = millis();
+        for (uint8_t y = 0; y < Matrix6x8::H; y++) {
+            const uint16_t idx = Matrix6x8::xyToIndex(x, y);
+            const uint8_t rowBit = (charIdx >= 0 && charIdx < kChars && inChar < 4)
+                ? glyphClockBitForMatrixY(kMsg[charIdx], y)
+                : (uint8_t)0;
+            uint32_t colr = 0;
+            if (bits & (1u << rowBit)) {
+                colr = fg;
+            }
+            const uint16_t outIdx = (uint16_t)(pin0 + idx);
+            if (outIdx <= (uint16_t)seg->stop && outIdx < stripLen) {
+                _fx->setPixelColor(outIdx, colr);
+            }
+        }
+    }
+    const uint16_t tailStart = (uint16_t)(pin0 + Matrix6x8::NUM);
+    for (uint16_t i = tailStart; i <= (uint16_t)seg->stop && i < stripLen; i++) {
+        _fx->setPixelColor(i, 0);
     }
 
-    uint32_t c1 = colores[index];
-    uint32_t c2 = colores[(index + 1) % 7];
-
-    uint8_t r = ((c1 >> 16) & 0xFF) + (((c2 >> 16) & 0xFF) - ((c1 >> 16) & 0xFF)) * t;
-    uint8_t g = ((c1 >> 8) & 0xFF) + (((c2 >> 8) & 0xFF) - ((c1 >> 8) & 0xFF)) * t;
-    uint8_t b = (c1 & 0xFF) + ((c2 & 0xFF) - (c1 & 0xFF)) * t;
-
-    uint32_t color = (r << 16) | (g << 8) | b;
-
-    for (uint16_t i = seg->start; i <= seg->stop; i++) {
-        _fx->setPixelColor(i, color);
+    stepDiv++;
+    if (stepDiv >= 2) {
+        stepDiv = 0;
+        scrollCol++;
+        if (scrollCol >= kTotalCols) {
+            scrollCol = 0;
+        }
     }
 
-    return seg->speed; 
+    return seg->speed > 0 ? seg->speed : 130;
 }
 
 /*
@@ -398,16 +662,20 @@ uint16_t CustomEffects::fade7() {
 static constexpr int kSpecSamples = 64;
 static constexpr int kSpecBatch = 64;
 
-/** Buffer + AGC compartidos: misma lectura/FFT que `spectrumVertical` (para AudioFire y espectro). */
+/** Buffer + forma de onda para FFT (ADC en 12b; I²S como float tras mismo decode que el nivel). */
 static uint16_t g_mic_fft_adc[kSpecSamples];
+static float g_mic_wave[kSpecSamples];
+#if defined(ARDUINO_ARCH_ESP32)
+static int32_t g_mic_i32[kSpecSamples];
+#endif
 static uint16_t g_mic_fft_pos = 0;
 static float g_mic_fft_peak_env = 0.08f;
 
 static float g_fft_real[kSpecSamples];
 static float g_fft_imag[kSpecSamples];
-/** Fs nominal (coherencia de bins; el muestreo real sigue siendo la ráfaga de analogRead). */
+/** Fs nominal INMP441 @ 16 kHz (I²S); con ADC analógico la ráfaga sigue siendo analogRead. */
 static ArduinoFFT<float> g_mic_fft_engine(
-    g_fft_real, g_fft_imag, (uint16_t)kSpecSamples, 5000.0f);
+    g_fft_real, g_fft_imag, (uint16_t)kSpecSamples, 16000.0f);
 
 /** 8 bandas en bins 1..31 (FFT 64 pt, sin DC); luego se mapean a 6 columnas de matriz. */
 static const uint8_t kFftBand8Lo[8] = {1, 5, 9, 13, 17, 21, 25, 29};
@@ -424,34 +692,98 @@ static constexpr float kMicAgcEnvFloor = 4e-5f;
  * @return false si aún no hay kSpecSamples muestras (el caller debe `return 4`).
  */
 static bool mic_fft_collect_and_compute(int mic_pin, float mags[6], float *out_mmax) {
-    for (int k = 0; k < kSpecBatch && g_mic_fft_pos < (uint16_t)kSpecSamples; k++) {
-        g_mic_fft_adc[g_mic_fft_pos++] = (uint16_t)analogRead(mic_pin);
+#if defined(ARDUINO_ARCH_ESP32)
+    if (mic_pin == REPISA_MIC_PIN_I2S) {
+        if (!repisaMicIsReady() || !repisaMicReadBlockInt32(g_mic_i32, kSpecSamples)) {
+            return false;
+        }
+        for (int i = 0; i < kSpecSamples; i++) {
+            const int32_t s = REPISA_I2S_PCM_FROM_RAW(g_mic_i32[i]);
+            const int32_t a = abs(s);
+            if (a >= REPISA_MIC_SIGNAL_FLOOR && a < REPISA_MIC_SIGNAL_CEILING) {
+                g_mic_wave[i] = (float)s;
+            } else {
+                g_mic_wave[i] = 0.f;
+            }
+        }
+    } else
+#endif
+    {
+        for (int k = 0; k < kSpecBatch && g_mic_fft_pos < (uint16_t)kSpecSamples; k++) {
+            g_mic_fft_adc[g_mic_fft_pos++] = (uint16_t)analogRead(mic_pin);
+        }
+        if (g_mic_fft_pos < (uint16_t)kSpecSamples) {
+            return false;
+        }
+        g_mic_fft_pos = 0;
+        for (int i = 0; i < kSpecSamples; i++) {
+            g_mic_wave[i] = (float)g_mic_fft_adc[i];
+        }
     }
-    if (g_mic_fft_pos < (uint16_t)kSpecSamples) {
-        return false;
-    }
-    g_mic_fft_pos = 0;
 
     float mean = 0;
-    uint16_t raw_min = 65535;
-    uint16_t raw_max = 0;
+    float wf_min = g_mic_wave[0];
+    float wf_max = g_mic_wave[0];
     for (int i = 0; i < kSpecSamples; i++) {
-        const uint16_t v = g_mic_fft_adc[i];
-        if (v < raw_min) {
-            raw_min = v;
+        const float v = g_mic_wave[i];
+        mean += v;
+        if (v < wf_min) {
+            wf_min = v;
         }
-        if (v > raw_max) {
-            raw_max = v;
+        if (v > wf_max) {
+            wf_max = v;
         }
-        mean += (float)g_mic_fft_adc[i];
     }
     mean /= (float)kSpecSamples;
-    const uint16_t span = (raw_max > raw_min) ? (uint16_t)(raw_max - raw_min) : 0;
+    const float span_f = wf_max - wf_min;
 
     const int span_cut =
         CustomEffects::micEffectiveSilenceSpan() + kMicSpanSilenceExtra +
         (int)((1.f - micSensNorm()) * 24.f);
-    if ((int)span < span_cut) {
+
+    bool fft_silence;
+    float span_gate = (float)span_cut;
+
+#if defined(ARDUINO_ARCH_ESP32)
+    /** SensibilidadMic RainMaker 0..1; `rm_noise_reject` alto = menos sensibilidad. */
+    const float rm_mic_sens = micSensNorm();
+    const float rm_noise_reject = 1.f - rm_mic_sens;
+    int i2s_level_gate = REPISA_MIC_SOUNDLEVEL_MIN;
+
+    if (mic_pin == REPISA_MIC_PIN_I2S) {
+        const float span_floor_dyn =
+            REPISA_MIC_BLOCK_SPAN_FLOOR +
+            rm_noise_reject * REPISA_MIC_SPAN_EXTRA_FROM_SENS;
+        const float span_scale_dyn =
+            REPISA_MIC_BLOCK_SPAN_SCALE * (0.42f + 0.58f * rm_mic_sens);
+        span_gate = fmaxf(span_floor_dyn, (float)span_cut * span_scale_dyn);
+        i2s_level_gate =
+            REPISA_MIC_SOUNDLEVEL_MIN +
+            (int)(rm_noise_reject * (float)REPISA_MIC_LEVEL_EXTRA_FROM_SENS + 0.5f);
+        /**
+         * No abrir FFT solo con nivel alto y span casi nulo (DC/offset I²S → barras 1–2 en silencio).
+         * Si `span_for_level` es demasiado bajo (p. ej. 0.15×gate), un silencio ruidoso (~150–300) pasaba.
+         * Calibra con el plotter: audio real trace 4 > ~1000 → exige aquí ~0.38–0.45× ese orden.
+         */
+        const float span_for_level =
+            fmaxf(
+                REPISA_MIC_SPAN_FOR_LEVEL_GATE_MIN,
+                fmaxf(
+                    span_gate * REPISA_MIC_SPAN_FOR_LEVEL_FRAC_GATE,
+                    REPISA_MIC_BLOCK_SPAN_FLOOR * REPISA_MIC_SPAN_FOR_LEVEL_FRAC_BLOCK_FLOOR)) +
+            rm_noise_reject * REPISA_MIC_SPAN_FOR_LEVEL_GATE_EXTRA;
+        const bool span_ok = span_f >= span_gate;
+        const bool level_and_span_ok =
+            ((float)soundLevel > (float)i2s_level_gate) && (span_f >= span_for_level);
+        fft_silence = !(span_ok || level_and_span_ok);
+    } else {
+        fft_silence = span_f < span_gate;
+    }
+#else
+    fft_silence = span_f < span_gate;
+#endif
+
+    if (fft_silence) {
         for (int c = 0; c < 6; c++) {
             mags[c] = 0.0f;
         }
@@ -463,13 +795,29 @@ static bool mic_fft_collect_and_compute(int mic_pin, float mags[6], float *out_m
             *out_mmax = 0.f;
         }
     } else {
+#if defined(ARDUINO_ARCH_ESP32)
+        /* I²S: escala REPISA_MIC_INV_FFT_SCALE_I2S en config.h (PCM14). */
+        const float inv_fft_scale =
+            (mic_pin == REPISA_MIC_PIN_I2S) ? REPISA_MIC_INV_FFT_SCALE_I2S : 4096.f;
+#else
+        const float inv_fft_scale = 4096.f;
+#endif
         for (int i = 0; i < kSpecSamples; i++) {
-            g_fft_real[i] = ((float)g_mic_fft_adc[i] - mean) / 4096.f;
+            g_fft_real[i] = (g_mic_wave[i] - mean) / inv_fft_scale;
             g_fft_imag[i] = 0.f;
         }
         g_mic_fft_engine.windowing(FFTWindow::Hann, FFTDirection::Forward, false);
         g_mic_fft_engine.compute(FFTDirection::Forward);
         g_mic_fft_engine.complexToMagnitude();
+
+#if defined(ARDUINO_ARCH_ESP32)
+        if (mic_pin == REPISA_MIC_PIN_I2S) {
+            /* Residuo DC en bin 0 y fuga fuerte en 1–2 (silencio → dos primeras columnas iluminadas). */
+            g_fft_real[0] = 0.f;
+            g_fft_real[1] *= REPISA_MIC_I2S_LOWBIN_ATTENUATION;
+            g_fft_real[2] *= (REPISA_MIC_I2S_LOWBIN_ATTENUATION + 0.33f);
+        }
+#endif
 
         float b8[8];
         for (int b = 0; b < 8; b++) {
@@ -551,8 +899,21 @@ static bool mic_fft_collect_and_compute(int mic_pin, float mags[6], float *out_m
             (mpeak_rel < 0.058f && mpeak < env_ref * 0.072f);
         const bool quiet_abs =
             (mpeak < 2.0e-4f && raw_peak < 4.5e-4f);
+#if defined(ARDUINO_ARCH_ESP32)
+        /* ADC: mismos tests relativos de siempre. I²S: mismos + patrón “solo graves/fuga” en silencio eléctrico. */
+        const bool adc_quiet =
+            (mic_pin != REPISA_MIC_PIN_I2S) &&
+            (quiet_flat || quiet_even || quiet_weak_vs_env || quiet_abs);
+        const bool i2s_quiet =
+            (mic_pin == REPISA_MIC_PIN_I2S) &&
+            ((quiet_flat || quiet_even || quiet_weak_vs_env || quiet_abs) ||
+             ((span_f < span_gate * 1.55f) && ((mags[0] + mags[1]) > 1.85f * (mags[2] + mags[3]) + 1e-7f) &&
+              (band_snr < 1.42f)));
+        const bool spectral_quiet = adc_quiet || i2s_quiet;
+#else
         const bool spectral_quiet =
             quiet_flat || quiet_even || quiet_weak_vs_env || quiet_abs;
+#endif
 
         if (spectral_quiet) {
             for (int c = 0; c < 6; c++) {
@@ -583,6 +944,394 @@ static bool mic_fft_collect_and_compute(int mic_pin, float mags[6], float *out_m
     return true;
 }
 
+static uint32_t turbo_mix_rgb(float t, uint32_t a, uint32_t b) {
+    if (t <= 0.f) {
+        return a;
+    }
+    if (t >= 1.f) {
+        return b;
+    }
+    const uint8_t ra = (uint8_t)((a >> 16) & 0xFFu);
+    const uint8_t ga = (uint8_t)((a >> 8) & 0xFFu);
+    const uint8_t ba = (uint8_t)(a & 0xFFu);
+    const uint8_t rb = (uint8_t)((b >> 16) & 0xFFu);
+    const uint8_t gb = (uint8_t)((b >> 8) & 0xFFu);
+    const uint8_t bb = (uint8_t)(b & 0xFFu);
+    return ((uint32_t)(uint8_t)((float)ra + t * ((float)rb - (float)ra)) << 16) |
+        ((uint32_t)(uint8_t)((float)ga + t * ((float)gb - (float)ga)) << 8) |
+        (uint32_t)(uint8_t)((float)ba + t * ((float)bb - (float)ba));
+}
+
+static uint32_t turbo_rgb_energy(uint32_t c) {
+    return (uint32_t)((c >> 16) & 0xFFu) + (uint32_t)((c >> 8) & 0xFFu) + (uint32_t)(c & 0xFFu);
+}
+
+/**
+ * TurboBoost — pista Hot Wheels + estelas de nitro por banda FFT:
+ * base en toda la matriz; cada disparo llena la columna con gradiente (amarillo punta → naranja → brasas);
+ * meta fila 7: destello blanco + nitro cian un frame.
+ */
+uint16_t CustomEffects::turboBoost() {
+    if (!_fx) {
+        return 50;
+    }
+    WS2812FX::Segment* seg = _fx->getSegment();
+    if (!seg) {
+        return 50;
+    }
+    const uint16_t stripLen = _fx->getLength();
+
+    static float proj_y[Matrix6x8::W];
+    static uint8_t flash_frm[Matrix6x8::W];
+    static float prev_ratio[Matrix6x8::W];
+    static uint8_t turbo_inited = 0;
+
+    if (!turbo_inited) {
+        for (uint8_t c = 0; c < Matrix6x8::W; c++) {
+            proj_y[c] = -1.f;
+            flash_frm[c] = 0;
+            prev_ratio[c] = 0.f;
+        }
+        turbo_inited = 1;
+    }
+
+    static constexpr float kBarPow = 0.74f;
+    static constexpr float kRatioCap = 1.55f;
+    static constexpr float kThrFire = 0.34f;
+    static constexpr float kThrArm = 0.22f;
+    static constexpr float kShotSpeed = 1.75f;
+    static constexpr uint8_t kFlashFrames = 7;
+
+    const uint32_t kYellowTip = ((uint32_t)255 << 16) | ((uint32_t)230 << 8) | 45;
+    const uint32_t kHwOrange = ((uint32_t)255 << 16) | ((uint32_t)68 << 8) | 0;
+    const uint32_t kRedCoals = ((uint32_t)110 << 16) | ((uint32_t)12 << 8) | 0;
+
+    const float sens = micSensNorm();
+    const float thr_on = kThrFire - sens * 0.07f;
+    const float thr_off = kThrArm - sens * 0.06f;
+
+    float track_heat = 0.f;
+
+    if (!REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
+        const uint32_t tm = millis();
+        for (uint8_t col = 0; col < Matrix6x8::W; col++) {
+            const float ph = (float)tm * 0.0031f + (float)col * 1.31f;
+            const float raw = 0.38f + 0.62f * (0.5f + 0.5f * sinf(ph + sinf(ph * 0.37f) * 0.4f));
+            const float shaped = powf(raw, kBarPow);
+            const bool armed = prev_ratio[col] <= thr_on;
+            if (shaped > thr_on && armed && proj_y[col] < 0.f && flash_frm[col] == 0) {
+                proj_y[col] = 0.f;
+            }
+            prev_ratio[col] = (shaped < thr_off) ? 0.f : shaped;
+        }
+        track_heat = 0.45f + 0.55f * (0.5f + 0.5f * sinf((float)tm * 0.0024f));
+    } else {
+        float mags[6];
+        float mmax_out = 0.f;
+        if (!mic_fft_collect_and_compute(mic_pin, mags, &mmax_out)) {
+            return 4;
+        }
+        const float env_agc = g_mic_fft_peak_env;
+        float mpeak_b = 0.f;
+        float acc = 0.f;
+        for (int c = 0; c < 6; c++) {
+            if (mags[c] > mpeak_b) {
+                mpeak_b = mags[c];
+            }
+            acc += mags[c];
+        }
+        const float norm_v =
+            fmaxf(fmaxf(env_agc, mpeak_b * 0.90f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
+        track_heat = fminf(1.f, (acc / 6.f) / fmaxf(norm_v, 1e-7f) * 0.85f);
+
+        for (uint8_t col = 0; col < Matrix6x8::W; col++) {
+            float ratio = norm_v > 1e-8f ? (mags[col] / norm_v) : 0.f;
+            if (ratio < 0.f) {
+                ratio = 0.f;
+            }
+            if (ratio > kRatioCap) {
+                ratio = kRatioCap;
+            }
+            const float shaped = powf(ratio, kBarPow);
+            const bool armed = prev_ratio[col] <= thr_on;
+            if (shaped > thr_on && armed && proj_y[col] < 0.f && flash_frm[col] == 0) {
+                proj_y[col] = 0.f;
+            }
+            prev_ratio[col] = (shaped < thr_off) ? 0.f : shaped;
+        }
+    }
+
+    const int y_top = (int)Matrix6x8::H - 1;
+
+    for (uint8_t col = 0; col < Matrix6x8::W; col++) {
+        if (flash_frm[col] > 0) {
+            continue;
+        }
+        if (proj_y[col] >= 0.f) {
+            proj_y[col] += kShotSpeed;
+            if (proj_y[col] >= (float)y_top - 0.25f) {
+                proj_y[col] = -1.f;
+                flash_frm[col] = kFlashFrames;
+            }
+        }
+    }
+
+    uint32_t pix[Matrix6x8::NUM];
+    const float hf = fminf(1.f, track_heat * 1.15f);
+    for (uint8_t x = 0; x < Matrix6x8::W; x++) {
+        for (uint8_t y = 0; y < Matrix6x8::H; y++) {
+            const float horizon = (float)y / fmaxf(1.f, (float)Matrix6x8::H - 1.f);
+            const uint8_t rb = (uint8_t)(10.f + hf * 48.f * (1.f - horizon * 0.55f));
+            const uint8_t gb = (uint8_t)(3.f + hf * 18.f * (1.f - horizon * 0.4f));
+            const uint8_t bb = (uint8_t)(2.f + hf * 10.f);
+            pix[Matrix6x8::xyToIndex(x, y)] = _fx->Color(rb, gb, bb);
+        }
+    }
+
+    for (uint8_t x = 0; x < Matrix6x8::W; x++) {
+        if (flash_frm[x] > 0) {
+            uint32_t hit = ((uint32_t)255 << 16) | ((uint32_t)255 << 8) | 255;
+            if (flash_frm[x] == kFlashFrames) {
+                hit = ((uint32_t)160 << 16) | ((uint32_t)255 << 8) | 255;
+            }
+            const uint16_t idm = Matrix6x8::xyToIndex(x, (uint8_t)y_top);
+            if (idm < Matrix6x8::NUM) {
+                const uint32_t prev = pix[idm];
+                pix[idm] = turbo_rgb_energy(hit) > turbo_rgb_energy(prev) ? hit : prev;
+            }
+            flash_frm[x]--;
+        } else if (proj_y[x] >= 0.f) {
+            const float hy = proj_y[x];
+            for (uint8_t y = 0; y < Matrix6x8::H; y++) {
+                const float d = hy - (float)y;
+                if (d < -0.55f) {
+                    continue;
+                }
+                const float span = fmaxf(hy + 0.7f, 1.2f);
+                float along = 1.f - d / span;
+                if (along < 0.f) {
+                    along = 0.f;
+                }
+                if (along > 1.f) {
+                    along = 1.f;
+                }
+                const float fall = expf(-fmaxf(0.f, d) * 0.34f);
+                uint32_t band = kYellowTip;
+                if (along < 0.25f) {
+                    band = kYellowTip;
+                } else if (along < 0.55f) {
+                    band = turbo_mix_rgb((along - 0.25f) / 0.30f, kYellowTip, kHwOrange);
+                } else {
+                    band = turbo_mix_rgb((along - 0.55f) / 0.45f, kHwOrange, kRedCoals);
+                }
+                const float tip_boost = (d < 1.1f) ? 1.18f : 1.f;
+                float bri_f = fall * tip_boost * (0.42f + 0.58f * (1.f - along * 0.65f));
+                if (bri_f > 1.f) {
+                    bri_f = 1.f;
+                }
+                const uint8_t rr =
+                    (uint8_t)((float)((band >> 16) & 0xFFu) * bri_f);
+                const uint8_t gg =
+                    (uint8_t)((float)((band >> 8) & 0xFFu) * bri_f);
+                const uint8_t bb = (uint8_t)((float)(band & 0xFFu) * bri_f);
+                const uint32_t sc = _fx->Color(rr, gg, bb);
+                const uint16_t idm = Matrix6x8::xyToIndex(x, y);
+                if (idm >= Matrix6x8::NUM) {
+                    continue;
+                }
+                const uint32_t prev = pix[idm];
+                pix[idm] = turbo_rgb_energy(sc) > turbo_rgb_energy(prev) ? sc : prev;
+            }
+        }
+    }
+
+    for (uint16_t i = 0; i < Matrix6x8::NUM && i < stripLen; i++) {
+        _fx->setPixelColor(i, pix[i]);
+    }
+
+    for (uint16_t i = Matrix6x8::NUM; i < stripLen; i++) {
+        _fx->setPixelColor(i, 0);
+    }
+
+    return 8;
+}
+
+/**
+ * Cuadro concéntrico desde el centro geométrico (distancia Chebyshev): el bloque crece con los graves;
+ * brillo y tono (HSV) siguen golpes y balance medio/agudo.
+ */
+uint16_t CustomEffects::hotWheelsNitro() {
+    if (!_fx) {
+        return 50;
+    }
+    WS2812FX::Segment* seg = _fx->getSegment();
+    if (!seg) {
+        return 50;
+    }
+    const uint16_t stripLen = _fx->getLength();
+    const uint32_t now_ms = millis();
+
+    static float rad_smooth = 0.f;
+    static float beat_flash = 0.f;
+    static float beat_env = 0.f;
+    static float hue_kick = 0.f;
+
+    static constexpr float kBarPow = 0.74f;
+    static constexpr float kRatioCap = 1.55f;
+    static constexpr float kBassPow = 0.52f;
+    static constexpr float kAttack = 0.92f;
+    static constexpr float kDecay = 0.52f;
+
+    /* Centro exacto entre LEDs: (2.5, 3.5) en 6×8. */
+    const float cx = 0.5f * (float)((int)Matrix6x8::W - 1);
+    const float cy = 0.5f * (float)((int)Matrix6x8::H - 1);
+    /* Radio máximo Chebyshev desde el centro hasta una esquina = max(cx, cy). */
+    const float d_max = fmaxf(cx, cy);
+
+    float radius_target = 0.f;
+    float level_drive = 0.f;
+    float bass_drive = 0.f;
+    float color_ratio = 0.5f;
+
+    if (!REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
+        const float ph = (float)now_ms * 0.0028f;
+        bass_drive = 0.38f + 0.62f * (0.5f + 0.5f * sinf(ph));
+        radius_target = bass_drive * d_max * 1.05f;
+        if (radius_target > d_max) {
+            radius_target = d_max;
+        }
+        level_drive = 0.42f + 0.35f * (0.5f + 0.5f * sinf(ph * 0.65f));
+        color_ratio = 0.5f + 0.5f * sinf(ph * 1.15f + 0.7f);
+        /* Pulso tipo beat en demo. */
+        const float pk = powf(fmaxf(0.f, sinf(ph * 5.8f)), 14.f);
+        beat_flash = fmaxf(beat_flash * 0.86f, pk * 1.15f);
+        if (pk > 0.55f) {
+            hue_kick = fminf(1.f, hue_kick + 0.55f);
+        }
+    } else {
+        float mags[6];
+        float mmax_out = 0.f;
+        if (!mic_fft_collect_and_compute(mic_pin, mags, &mmax_out)) {
+            return 4;
+        }
+        const float env_agc = g_mic_fft_peak_env;
+        float mpeak_b = 0.f;
+        for (int c = 0; c < 6; c++) {
+            if (mags[c] > mpeak_b) {
+                mpeak_b = mags[c];
+            }
+        }
+        const float norm_v =
+            fmaxf(fmaxf(env_agc, mpeak_b * 0.90f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
+
+        float lr = norm_v > 1e-8f ? (mmax_out / norm_v) : 0.f;
+        if (lr < 0.f) {
+            lr = 0.f;
+        }
+        if (lr > kRatioCap) {
+            lr = kRatioCap;
+        }
+        level_drive = powf(lr, kBarPow);
+
+        float bass_peak = 0.f;
+        float bass_sum = 0.f;
+        for (int c = 0; c < 3; c++) {
+            float ratio = norm_v > 1e-8f ? (mags[c] / norm_v) : 0.f;
+            if (ratio < 0.f) {
+                ratio = 0.f;
+            }
+            if (ratio > kRatioCap) {
+                ratio = kRatioCap;
+            }
+            const float shaped = powf(ratio, kBassPow);
+            bass_sum += shaped;
+            if (shaped > bass_peak) {
+                bass_peak = shaped;
+            }
+        }
+        bass_sum /= 3.f;
+        bass_drive = fmaxf(bass_sum * 1.08f, bass_peak * 1.25f);
+        radius_target = bass_drive * d_max * 1.12f;
+        if (radius_target > d_max) {
+            radius_target = d_max;
+        }
+
+        /* Color según medios + agudos (columnas 3–5 del espectro 6 bandas). */
+        float mid_hi = 0.f;
+        for (int c = 3; c < 6; c++) {
+            float ratio = norm_v > 1e-8f ? (mags[c] / norm_v) : 0.f;
+            if (ratio < 0.f) {
+                ratio = 0.f;
+            }
+            if (ratio > kRatioCap) {
+                ratio = kRatioCap;
+            }
+            mid_hi += powf(ratio, 0.62f);
+        }
+        mid_hi /= 3.f;
+        color_ratio = fminf(1.f, mid_hi * 1.35f);
+
+        /* Detección simple de beat: pico del instantáneo respecto a envolvente lenta. */
+        const float inst = mmax_out;
+        beat_env = beat_env * 0.93f + inst * 0.07f;
+        const float rel = beat_env > 1e-9f ? inst / beat_env : 0.f;
+        const float floor_inst = fmaxf(kMicAgcEnvFloor * 120.f, norm_v * 2.5e-4f);
+        if (rel > 1.42f && inst > floor_inst * 3.f) {
+            beat_flash = fminf(1.f, beat_flash + 0.48f);
+            hue_kick = fminf(1.f, hue_kick + 0.42f);
+        }
+        beat_flash *= 0.84f;
+    }
+
+    hue_kick *= 0.90f;
+
+    if (radius_target > rad_smooth) {
+        rad_smooth += (radius_target - rad_smooth) * kAttack;
+    } else {
+        rad_smooth -= (rad_smooth - radius_target) * kDecay;
+    }
+    if (rad_smooth < 0.f) {
+        rad_smooth = 0.f;
+    }
+    if (rad_smooth > d_max) {
+        rad_smooth = d_max;
+    }
+
+    const uint32_t hue_spin = (uint32_t)(now_ms / 4U) & 0xFFFFU;
+    const uint16_t hue =
+        (uint16_t)(hue_spin + (uint16_t)(color_ratio * 15000.f) + (uint16_t)(hue_kick * 11000.f) +
+                   (uint16_t)(beat_flash * 7500.f));
+
+    for (uint8_t x = 0; x < Matrix6x8::W; x++) {
+        for (uint8_t y = 0; y < Matrix6x8::H; y++) {
+            const uint16_t idx = Matrix6x8::xyToIndex(x, y);
+            if (idx >= stripLen) {
+                continue;
+            }
+            const float dx = fabsf((float)x - cx);
+            const float dy = fabsf((float)y - cy);
+            const float d = fmaxf(dx, dy);
+
+            uint32_t colr = 0;
+            if (d <= rad_smooth + 0.02f && rad_smooth > 0.02f) {
+                const float edge = rad_smooth > 1e-4f ? d / rad_smooth : 0.f;
+                const float center_boost = (1.f - edge) * 0.28f;
+                const int bri = (int)(22.f + beat_flash * 218.f + level_drive * 95.f + center_boost * 120.f);
+                const uint8_t vb = (uint8_t)constrain(bri, 0, 255);
+                colr = _fx->ColorHSV(hue, 255, vb);
+            }
+
+            _fx->setPixelColor(idx, colr);
+        }
+    }
+
+    for (uint16_t i = Matrix6x8::NUM; i < stripLen; i++) {
+        _fx->setPixelColor(i, 0);
+    }
+
+    return 18;
+}
+
 // Espectrograma vertical 6×8 (serpentina Matrix6x8). 6 columnas desde FFT 64 + 8 bandas.
 uint16_t CustomEffects::spectrumVertical() {
     if (!_fx) {
@@ -595,7 +1344,7 @@ uint16_t CustomEffects::spectrumVertical() {
 
     const uint16_t stripLen = _fx->getLength();
 
-    if (mic_pin < 0) {
+    if (!REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
         for (uint16_t i = 0; i < stripLen && i < Matrix6x8::NUM; i++) {
             _fx->setPixelColor(i, 0x080808);
         }
@@ -759,7 +1508,7 @@ uint16_t CustomEffects::audioFire() {
     float bass_drive = 0.f;
     float level_drive = 0.f;
 
-    if (mic_pin < 0) {
+    if (!REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
         /* Sin mic: demo suave para ver el fuego */
         bass_drive = 0.35f + 0.25f * sinf((float)tm * 0.0031f);
         level_drive = 0.45f + 0.15f * sinf((float)tm * 0.0022f);
@@ -776,7 +1525,8 @@ uint16_t CustomEffects::audioFire() {
                 mpeak_b = mags[c];
             }
         }
-        const float norm_v = fmaxf(fmaxf(env_agc, mpeak_b * 0.90f), kMicAgcEnvFloor);
+        const float norm_v =
+            fmaxf(fmaxf(env_agc, mpeak_b * 0.90f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
         static constexpr float kBarPow = 0.74f;
         static constexpr float kRatioCap = 1.55f;
         /* Bajos = promedio de las 3 bandas graves con el mismo mapeo que las barras del espectro. */
@@ -800,6 +1550,9 @@ uint16_t CustomEffects::audioFire() {
             lr = kRatioCap;
         }
         level_drive = powf(lr, kBarPow);
+        /* −50 % sensibilidad respecto al cálculo FFT (Spectrum6x8 sin cambios). */
+        bass_drive *= 1.f;
+        level_drive *= 0.3f;
     }
 
     /* Mismo α que el espectrograma para suavizar drive (kEmaAlpha = 0.42). */
@@ -896,16 +1649,20 @@ uint16_t CustomEffects::vuMeterFull() {
     const uint32_t now_ms = millis();
 
     static float disp = 0.f;
+    /** Solo dibujo: cae más lento que `disp` en bajadas bruscas (anti-strobe); zona entre ambos = “fantasma” tenue. */
+    static float disp_soft = 0.f;
     static float peak_val = 0.f;
     static uint32_t peak_last_rise_ms = 0;
 
     static constexpr float kBarPow = 0.74f;
     static constexpr float kRatioCap = 1.55f;
-    static constexpr uint32_t kPeakHoldMs = 200UL;
+    static constexpr uint32_t kPeakHoldMs = 125UL;
 
     float target = 0.f;
 
-    if (mic_pin < 0) {
+    const float disp_aggressive = disp;
+
+    if (!REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
         /* Demo sin mic: barrido tipo VU para validar gradiente y pico. */
         const float ph = (float)now_ms * 0.0045f;
         const float w = 0.5f + 0.5f * sinf(ph);
@@ -917,7 +1674,8 @@ uint16_t CustomEffects::vuMeterFull() {
             return 4;
         }
         const float norm = g_mic_fft_peak_env;
-        const float norm_vu = fmaxf(fmaxf(norm, mmax_out * 0.92f), kMicAgcEnvFloor);
+        const float norm_vu =
+            fmaxf(fmaxf(norm, mmax_out * 0.92f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
         float lr = norm_vu > 1e-8f ? (mmax_out / norm_vu) : 0.f;
         if (lr < 0.f) {
             lr = 0.f;
@@ -937,26 +1695,50 @@ uint16_t CustomEffects::vuMeterFull() {
         if (target > (float)Matrix6x8::H) {
             target = (float)Matrix6x8::H;
         }
+        /* −50 % sensibilidad VU (Spectrum6x8 sin cambios). */
+        target *= 1.f;
     }
 
-    /* Ataque instantáneo, caída amortiguada (más lenta con sensibilidad baja = menos “nervioso”). */
+    /* Subida: como aguja al máximo instantáneo. Bajada: proporcional al hueco para seguir cambios leves sin “pegarse” a una fila. */
     if (target > disp) {
         disp = target;
     } else {
-        const float fall = 0.11f + (1.f - p) * 0.10f;
-        disp = fmaxf(target, disp - fall);
+        const float gap_dn = disp - target;
+        const float k_dn = 0.62f + p * 0.28f;
+        disp -= gap_dn * k_dn;
+        if (disp < target) {
+            disp = target;
+        }
     }
     if (disp < 0.f) {
         disp = 0.f;
     }
 
-    /* Pico: sube con el nivel; tras 200 ms sin nuevo máximo, cae hacia el nivel actual. */
+    const float drop_snap = disp_aggressive - disp;
+    const bool brutal_drop = drop_snap > 1.05f;
+    if (disp >= disp_soft - 1e-4f) {
+        disp_soft = disp;
+    } else if (brutal_drop) {
+        const float k_ghost = 0.17f + p * 0.07f;
+        disp_soft += (disp - disp_soft) * k_ghost;
+    } else {
+        disp_soft = disp;
+    }
+    if (disp_soft < 0.f) {
+        disp_soft = 0.f;
+    }
+    if (disp_soft > (float)Matrix6x8::H) {
+        disp_soft = (float)Matrix6x8::H;
+    }
+
+    /* Pico: tras breve hold baja más rápido hacia el nivel mostrado. */
     if (disp >= peak_val - 1e-3f) {
         peak_val = disp;
         peak_last_rise_ms = now_ms;
     } else if ((uint32_t)(now_ms - peak_last_rise_ms) >= kPeakHoldMs) {
-        const float pfall = 0.14f + (1.f - p) * 0.11f;
-        peak_val = fmaxf(disp, peak_val - pfall);
+        const float gap_p = peak_val - disp;
+        const float pfall = (0.14f + (1.f - p) * 0.11f) * (1.65f + p * 0.35f);
+        peak_val = fmaxf(disp, peak_val - fmaxf(gap_p * 0.55f, pfall));
     }
 
     const int peak_row = (peak_val > disp + 0.07f)
@@ -969,12 +1751,24 @@ uint16_t CustomEffects::vuMeterFull() {
             if (idx >= stripLen) {
                 continue;
             }
-            const float thr = disp - (float)y;
+            const float lit_hard = disp - (float)y;
+            const float lit_soft = disp_soft - (float)y;
             uint32_t colr = 0;
-            if (thr > 0.f) {
-                const float frac = (thr >= 1.f) ? 1.f : thr;
-                uint8_t bri = (uint8_t)(frac * 255.f + 0.5f);
-                if (bri < 1 && frac > 0.f) {
+            float frac = 0.f;
+            bool ghost_tail = false;
+            if (lit_hard > 0.f) {
+                frac = (lit_hard >= 1.f) ? 1.f : lit_hard;
+            } else if (lit_soft > 0.f) {
+                frac = (lit_soft >= 1.f) ? 1.f : lit_soft;
+                ghost_tail = true;
+            }
+            if (frac > 0.f) {
+                float bri_f = frac * 255.f;
+                if (ghost_tail) {
+                    bri_f *= 0.34f + p * 0.20f;
+                }
+                uint8_t bri = (uint8_t)(bri_f + 0.5f);
+                if (bri < 1 && bri_f > 0.f) {
                     bri = 1;
                 }
                 const uint16_t hue = vu_meter_row_hue(y);
@@ -994,6 +1788,7 @@ uint16_t CustomEffects::vuMeterFull() {
     return 14;
 }
 
+
 uint16_t CustomEffects::impactShow() {
     if (!_fx) {
         return 50;
@@ -1011,35 +1806,151 @@ uint16_t CustomEffects::impactShow() {
     static float env = 0;
     static float prev = 0;
     static uint8_t pulse = 0;
+    static int imp_s_last = -1;
+    /** 0..1 suavizado: mismo origen que AudioFire/VU (`level_drive` tras FFT + AGC). */
+    static float imp_vu_sm = 0.f;
 
     const float p = micSensNorm();
-    float drive = 35.f + 35.f * sinf((float)t * 0.0021f);
-    if (mic_pin >= 0) {
-        const int s = analogRead(mic_pin);
-        dc = dc * 0.90f + (float)s * 0.10f;
-        float d = fabsf((float)s - dc);
-        const float dead = (float)micEffectiveDeadband() * (0.78f - 0.28f * p);
-        if (d < dead) {
-            d = 0.f;
+    const float drive_geom = 35.f + 35.f * sinf((float)t * 0.0021f);
+
+    float vu_lin = 0.f;
+    if (REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
+        float mags[6];
+        float mmax_out = 0.f;
+        if (!mic_fft_collect_and_compute(mic_pin, mags, &mmax_out)) {
+            return 4;
+        }
+        const float norm = g_mic_fft_peak_env;
+        const float norm_vu =
+            fmaxf(fmaxf(norm, mmax_out * 0.92f), kMicAgcEnvFloor) * micGlobalVuNormStretch(mic_pin);
+        static constexpr float kBarPowVu = 0.74f;
+        static constexpr float kRatioCapVu = 1.55f;
+        float lr = norm_vu > 1e-8f ? (mmax_out / norm_vu) : 0.f;
+        if (lr < 0.f) {
+            lr = 0.f;
+        }
+        if (lr > kRatioCapVu) {
+            lr = kRatioCapVu;
+        }
+        const float level_drive = powf(lr, kBarPowVu);
+        const float noise_floor = 0.022f + (1.f - p) * 0.055f;
+        if (level_drive > noise_floor) {
+            const float head = 1.f - noise_floor;
+            vu_lin = (level_drive - noise_floor) / head;
         } else {
-            d = (d - dead) * (1.05f + p * 1.35f);
+            vu_lin = 0.f;
         }
-        const float ek = 0.70f - p * 0.30f;
-        env = env * ek + d * (1.f - ek);
-        /* Trigger más sensible: detecta transientes con menos umbral y más duración de pulso. */
-        const float edge = 4.f + (1.f - p) * 14.f;
-        const float floorv = 5.f + (1.f - p) * 20.f;
-        if ((env - prev > edge) && (env > floorv)) {
-            pulse = 28;
+        if (vu_lin > 1.18f) {
+            vu_lin = 1.18f;
         }
+    } else {
+        const float ph = (float)t * 0.0045f;
+        vu_lin = 0.48f + 0.42f * sinf(ph);
+    }
+
+    /* Mismo α que AudioFire (`af_bass_sm` / `af_level_sm`, ema_b = 0.42f). */
+    static constexpr float kImpactVuEma = 0.42f;
+    imp_vu_sm = imp_vu_sm * (1.f - kImpactVuEma) + vu_lin * kImpactVuEma;
+
+    if (REPISA_MIC_INPUT_ACTIVE(mic_pin)) {
+#if defined(ARDUINO_ARCH_ESP32)
+        const int s = (mic_pin == REPISA_MIC_PIN_I2S) ? (int)soundLevel : analogRead(mic_pin);
+#else
+        const int s = analogRead(mic_pin);
+#endif
+        int dj_step = 0;
+#if defined(ARDUINO_ARCH_ESP32)
+        if (mic_pin == REPISA_MIC_PIN_I2S && imp_s_last >= 0) {
+            dj_step = (s > imp_s_last) ? (s - imp_s_last) : (imp_s_last - s);
+        }
+#endif
+        dc = dc * 0.90f + (float)s * 0.10f;
+        const float d_trans = fabsf((float)s - dc);
+        float dead = (float)micEffectiveDeadband() * (0.78f - 0.28f * p);
+#if defined(ARDUINO_ARCH_ESP32)
+        if (mic_pin == REPISA_MIC_PIN_I2S) {
+            dead *= REPISA_MIC_IMPACT_DEAD_MULT_I2S * 0.30f;
+        }
+#endif
+        float d_t = 0.f;
+        if (d_trans >= dead) {
+            d_t = (d_trans - dead) * (1.05f + p * 1.35f);
+        }
+
+        float d = d_t;
+#if defined(ARDUINO_ARCH_ESP32)
+        /**
+         * I²S: `soundLevel` es media de |PCM|; `dc` rápido → |s−dc| ≈ 0 con música sostenida.
+         * Nivel sobre base lenta + `soundSpan` pasan por un dead más bajo y se suman al transitorio.
+         */
+        if (mic_pin == REPISA_MIC_PIN_I2S) {
+            static float dc_slow = -1.f;
+            if (dc_slow < 0.f) {
+                dc_slow = (float)s;
+            } else {
+                dc_slow = dc_slow * 0.991f + (float)s * 0.009f;
+            }
+            const float sustain = fmaxf(0.f, (float)s - dc_slow);
+            const float span_f = (float)soundSpan;
+            /* Nivel sostenido (sustain + span nivel); ritmo fuerte solo vía stomp/dj_step (sin Δspan por buffer). */
+            const float music_raw =
+                sustain * (0.85f + p * 1.15f) + span_f * (0.0019f + p * 0.0016f);
+            const float m_dead = dead * 0.14f + 4.f;
+            const float music_net =
+                (music_raw > m_dead) ? (music_raw - m_dead) * (1.45f + p * 0.85f) : 0.f;
+            d = d_t + music_net;
+            /* Solo |ΔsoundLevel| fuerte = ritmo; sin derivada de span (ruido I²S → titileo constante). */
+            const float stomp_thr = 14.f + (1.f - p) * 38.f;
+            const float stomp = fmaxf(0.f, (float)dj_step - stomp_thr);
+            d += stomp * (0.95f + p * 0.75f);
+        }
+#endif
+        if (mic_pin == REPISA_MIC_PIN_I2S) {
+            const float ek_att = 0.42f - p * 0.10f;
+            const float ek_dec = 0.82f - p * 0.16f;
+            if (d > env) {
+                env = env * ek_att + d * (1.f - ek_att);
+            } else {
+                env = env * ek_dec + d * (1.f - ek_dec);
+            }
+        } else {
+            const float ek = 0.58f - p * 0.22f;
+            env = env * ek + d * (1.f - ek);
+        }
+#if defined(ARDUINO_ARCH_ESP32)
+        if (mic_pin == REPISA_MIC_PIN_I2S) {
+            const float edge_i2s =
+                fmaxf((4.f + (1.f - p) * 14.f) * 0.35f, env * (0.14f + p * 0.10f) + 2.f);
+            const float floorv_i2s =
+                fmaxf((5.f + (1.f - p) * 20.f) * 0.30f, env * (0.20f + p * 0.12f) + 3.f);
+            const int dj_need = (int)(10.f + (1.f - p) * 38.f);
+            const bool snap_hit = (dj_step >= dj_need);
+            const bool snap_rel = (imp_s_last > 120) && (dj_step * 25 > imp_s_last);
+            const bool env_hit = (env - prev > edge_i2s) && (env > floorv_i2s);
+            if (snap_hit || snap_rel || env_hit) {
+                pulse = 36;
+            }
+            imp_s_last = s;
+        } else {
+            const float edge = 4.f + (1.f - p) * 14.f;
+            const float floorv = 5.f + (1.f - p) * 20.f;
+            if ((env - prev > edge) && (env > floorv)) {
+                pulse = 28;
+            }
+        }
+#else
+        {
+            const float edge = 4.f + (1.f - p) * 14.f;
+            const float floorv = 5.f + (1.f - p) * 20.f;
+            if ((env - prev > edge) && (env > floorv)) {
+                pulse = 28;
+            }
+        }
+#endif
         prev = prev * (0.74f - p * 0.10f) + env * (0.26f + p * 0.10f);
-        drive = 24.f + env * (1.25f + p * 2.25f);
     }
 
-    if (pulse > 0) {
-        pulse--;
-    }
-
+    /* Patrón geométrico / matiz fijo; V y S desde `imp_vu_sm` (FFT+AGC como AudioFire / SonidoColor). */
     const float phase = (float)t * 0.0042f;
     for (uint8_t col = 0; col < Matrix6x8::W; col++) {
         for (uint8_t row = 0; row < Matrix6x8::H; row++) {
@@ -1053,15 +1964,33 @@ uint16_t CustomEffects::impactShow() {
             const uint16_t hue = (uint16_t)(
                 (int32_t)(sinf(phase + dist * 0.75f + (float)col * 0.35f) * 10000.f)
                 + (int32_t)t * 3 + (int32_t)col * 3200 + (int32_t)row * 1800);
-            int val = (int)(94.f + sinf(dist * 0.9f - phase * 6.f) * 56.f + drive * 0.68f);
+            const int base_geo =
+                (int)(68.f + sinf(dist * 0.9f - phase * 6.f) * 50.f + drive_geom * 0.34f);
+            /* `imp_vu_sm` ≈ 0..1 (igual cadena que VU: level_drive + noise_floor + EMA 0.42). */
+            const float vu_boost = imp_vu_sm * 128.f + (pulse > 0 ? 34.f : 0.f);
+            const int bri_boost = (int)vu_boost;
+            const uint8_t sat =
+                (uint8_t)constrain(52 + (int)(imp_vu_sm * 205.f), 48, 255);
+            uint32_t c;
             if (pulse > 0) {
-                val += (int)pulse * 11;
+                const uint8_t sat_p =
+                    (uint8_t)constrain((int)pulse * 5 + 55, 55, 220);
+                c = _fx->ColorHSV(hue, sat_p, 255);
+            } else {
+                int val = base_geo + bri_boost;
+                if (val < 36) {
+                    val = 36;
+                }
+                if (val > 255) {
+                    val = 255;
+                }
+                c = _fx->ColorHSV(hue, sat, (uint8_t)val);
             }
-            val = (val < 34) ? 34 : val;
-            val = (val > 255) ? 255 : val;
-            const uint32_t c = _fx->ColorHSV(hue, 255, (uint8_t)val);
             _fx->setPixelColor(idx, c);
         }
+    }
+    if (pulse > 0) {
+        pulse--;
     }
     for (uint16_t i = Matrix6x8::NUM; i < stripLen; ++i) {
         _fx->setPixelColor(i, 0);

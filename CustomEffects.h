@@ -17,7 +17,7 @@ public:
     static uint8_t getSoundHue6x8();
     static uint8_t getImpact6x8();
     static uint8_t getHotWheels6x8();
-    /** Pin ADC del micrófono (MAX9814 OUT, misma señal que reacción al sonido). */
+    /** Pin ADC (≥0) o REPISA_MIC_PIN_I2S en ESP32 (INMP441 I²S); debe coincidir con CintaLED::setPinSonidoAnalogo. */
     static void setMicPin(int pin);
     /** 0 = menos sensible, 100 = más (reacción al sonido + espectrograma). */
     static void setMicSensitivityPct(uint8_t pct0_100);
@@ -28,8 +28,8 @@ public:
     // efectos
     static uint16_t jump3();
     static uint16_t jump7();
-    static uint16_t fade3();
-    static uint16_t fade7();
+    static uint16_t hotWheelsNitro();
+    static uint16_t turboBoost();
     static uint16_t spectrumVertical();
     /** Antes "SonidoBrillo": hoguera Fire2012 + FFT (bajos en la base). */
     static uint16_t audioFire();

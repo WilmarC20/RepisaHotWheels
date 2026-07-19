@@ -1,5 +1,8 @@
 #include "Arduino.h"
 #include "CintaLED.h"
+#if defined(ARDUINO_ARCH_ESP32)
+#include "RepisaMic.h"
+#endif
 
 CintaLED::CintaLED(int LPIN,int NLEDS,std::function<void(String, const value_t &)> callback,int tipo_led)
 {
@@ -45,6 +48,14 @@ void CintaLED::iniciar(bool encender,int Brillo,int Color,String Efectos) {
 void CintaLED::setPinSonidoAnalogo(int pin) {
    sound_ao_pin = pin;
    CustomEffects::setMicPin(pin);
+#if defined(ARDUINO_ARCH_ESP32)
+   if (pin == REPISA_MIC_PIN_I2S) {
+      /* Nivel = misma métrica que el sketch (soundLevel); sin pseudo-ADC 12 bits. */
+      sonido_baseline = 0.f;
+      sonido_envelope = 0;
+      return;
+   }
+#endif
    if (pin >= 0) {
 #if defined(ARDUINO_ARCH_ESP32)
       analogReadResolution(12);
@@ -65,16 +76,30 @@ void CintaLED::setPinSonidoAnalogo(int pin) {
 }
 
 void CintaLED::setReaccionSonido(bool activo) {
+#if defined(ARDUINO_ARCH_ESP32)
+   reaccion_sonido = activo && (sound_ao_pin >= 0 || sound_ao_pin == REPISA_MIC_PIN_I2S);
+#else
    reaccion_sonido = activo && sound_ao_pin >= 0;
+#endif
    if (sound_ao_pin >= 0) {
       sonido_baseline = (float)analogRead(sound_ao_pin);
    }
+#if defined(ARDUINO_ARCH_ESP32)
+   else if (sound_ao_pin == REPISA_MIC_PIN_I2S) {
+      sonido_baseline = 0.f;
+   }
+#endif
    sonido_envelope = 0;
    last_sound_ms = 0;
 }
 
 void CintaLED::aplicarBrilloPorSonido() {
-   if (sound_ao_pin < 0 || !reaccion_sonido) {
+#if defined(ARDUINO_ARCH_ESP32)
+   const bool pin_ok = (sound_ao_pin >= 0) || (sound_ao_pin == REPISA_MIC_PIN_I2S);
+#else
+   const bool pin_ok = sound_ao_pin >= 0;
+#endif
+   if (!pin_ok || !reaccion_sonido) {
       return;
    }
    const unsigned long ahora = millis();
@@ -83,7 +108,11 @@ void CintaLED::aplicarBrilloPorSonido() {
    }
    last_sound_ms = ahora;
 
+#if defined(ARDUINO_ARCH_ESP32)
+   const int raw = (sound_ao_pin == REPISA_MIC_PIN_I2S) ? (int)soundLevel : analogRead(sound_ao_pin);
+#else
    const int raw = analogRead(sound_ao_pin);
+#endif
    if (sonido_baseline <= 1.0f) {
       sonido_baseline = (float)raw;
    } else {

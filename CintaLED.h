@@ -5,8 +5,11 @@
 
 #include <WS2812FX.h>
 #include "CustomEffects.h"
+#include "config.h"
 
-#define TIMER_MS 5000
+#ifndef TIMER_MS
+#define TIMER_MS ((int)REPISA_CINTA_AUTO_MODE_MS)
+#endif
 
 #include <Preferences.h>
 
@@ -42,7 +45,7 @@ value_t valueT;
   int modo(const char * Modo);
   int brilloMas(int brillo);
   int  brillo(int brill);
-  /** Pin ADC del MAX9814 (salida OUT). Usa -1 para desactivar. */
+  /** Pin ADC (≥0) o REPISA_MIC_PIN_I2S (ESP32, INMP441 por I²S legacy). -1 desactiva. */
   void setPinSonidoAnalogo(int pin);
   /** Si true, en procesar() el brillo sigue el nivel del micrófono (modo “música”). */
   void setReaccionSonido(bool activo);

@@ -1,9 +1,13 @@
 // ESP RainMaker + CintaLED + IRControlLite (provisión como ejemplo que te funciona en tu core)
+#include "config.h"
 #include "RMaker.h"
 #include "WiFi.h"
 #include "WiFiProv.h"
 #include "IRControlLite.h"
 #include "CintaLED.h"
+#if defined(ARDUINO_ARCH_ESP32)
+#include "RepisaMic.h"
+#endif
 #include <Preferences.h>
 #include <esp_event.h>
 #include <esp_system.h>
@@ -16,14 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-/** Versión compilada (sube este valor al publicar firmware nuevo). */
-#define REPISA_FW_VERSION "0.1.0"
-/** Mismo JSON que audio_pin_test hasta tener uno en el repo RepisaHotWheels (raw GitHub). */
-#define REPISA_FW_JSON_URL "https://raw.githubusercontent.com/WilmarC20/EsferasDelDragon-Releases/main/firmware.json"
-
-#define REPISA_RM_PARAM_VERIFICAR "ComprobarGit"
-#define REPISA_RM_PARAM_INFO "InfoActualizacion"
-#define REPISA_RM_PARAM_VERSION_LOCAL "VersionFirmware"
+/** Versión: ver `REPISA_FW_VERSION` en config.h. */
 
 extern Device *luz_led;
 
@@ -132,8 +129,7 @@ static constexpr const char *kRepisaRmPrefScenesSeed = "scenes_seed";
 
 static void repisaLimpiarFlagEscenasRainMakerSeed();
 
-/** Saturación fija al máximo (no hay parámetro RainMaker ni voz para saturación). */
-static constexpr int kRepisaSaturationByte = 255;
+/** Saturación: `REPISA_COLOR_SATURATION_BYTE` en config.h. */
 
 /** La nube puede enviar entero, float o cadena (p. ej. Google Home / rutinas). */
 static int repisaIntFromCloudVal(const param_val_t &v, int fallback) {
@@ -192,37 +188,8 @@ static bool repisaIsPowerParam(const char *name) {
 #endif
 #endif
 
-const char *service_name = "PROV_1234";
-const char *pop = "abcd1234";
-
-#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32S3
-#define IR_RECEIVE_PIN 4
-#else
-/* ESP32 WROOM / D1 mini: receptor IR en GPIO 4 (17 u otros suelen estar ocupados o no cableados). */
-#define IR_RECEIVE_PIN 4
-#endif
-
-#define BOOT_BUTTON_PIN 0
-#define RESET_HOLD_TIME 5000
-
-/* Reinicio fabrica sin boton ni PC: solo ciclos de alimentacion (ver mensaje al arrancar). */
-static constexpr uint8_t kRepisaPwrCyclesParaFabrica = 6;
-static constexpr uint32_t kRepisaTiempoEncendidoEstableMs = 45000UL;
-
-/* Micrófono MAX9814 (salida OUT → GPIO ADC). Elige un pin con ADC y sin conflicto con IR/tira.
- * Alimentación: lo ideal es VDD del MAX9814 a 3.3 V del ESP (OUT queda dentro del ADC ~0–3.3 V).
- * Si alimentas el MAX9814 a 5 V, OUT puede superar 3.3 V en voz fuerte y dañar el GPIO:
- *   usa divisor (p. ej. 22 kΩ desde OUT + 33 kΩ a GND, nodo central al ADC) o pasa VDD a 3.3 V.
- * ESP32-C6 Super Mini: GPIO8 = WS2812 de la placa; revisa strapping/JTAG en otros pines.
- *   https://www.espboards.dev/esp32/esp32-c6-super-mini/
- * ESP32-S3: GPIO 1–10 suelen ser ADC1. ESP32 clásico: 34 (ADC-only, sin pull interno). */
-#if CONFIG_IDF_TARGET_ESP32C6
-#define SOUND_SENSOR_AO_PIN 3
-#elif CONFIG_IDF_TARGET_ESP32S3
-#define SOUND_SENSOR_AO_PIN 8
-#else
-#define SOUND_SENSOR_AO_PIN 34
-#endif
+const char *service_name = REPISA_PROVISION_SERVICE_NAME;
+const char *pop = REPISA_PROVISION_POP;
 
 Preferences *prefs = nullptr;
 IRControlLite *irControl = nullptr;
@@ -268,19 +235,16 @@ const AccionesIR AccionIR[] PROGMEM = {
    {"CYAN", [] { cinta->setReaccionSonido(false);cinta->color(0, 255, 255, FX_MODE_STATIC); }, nullptr, nullptr},
    {"PURPURA", [] { cinta->setReaccionSonido(false);cinta->color(128, 0, 128, FX_MODE_STATIC); }, nullptr, nullptr},
 
-   {"JUMP3", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getHotWheels6x8()); }, nullptr, nullptr},
-   {"JUMP7", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getJump7()); }, nullptr, nullptr},
+   {"JUMP3", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getHotWheels6x8()); }, nullptr, nullptr},
+   {"RELOJ", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getJump7()); }, nullptr, nullptr},
    {"FADE3", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getFade3()); }, nullptr, nullptr},
-   {"FADE7", [] { cinta->setReaccionSonido(false);cinta->modo(CustomEffects::getFade7()); }, nullptr, nullptr},
+   {"FADE7", [] { cinta->setReaccionSonido(true);cinta->modo(CustomEffects::getFade7()); }, nullptr, nullptr},
 
    {"M1", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getSpectrum6x8()); cinta->encender(); }, nullptr, nullptr},
    {"M2", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getSoundBright6x8()); cinta->encender(); }, nullptr, nullptr},
    {"M3", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getSoundHue6x8()); cinta->encender(); }, nullptr, nullptr},
    {"M4", [] { cinta->setReaccionSonido(false); cinta->modo(CustomEffects::getImpact6x8()); cinta->encender(); }, nullptr, nullptr},
    {"M5", [] { cinta->modo(-1, true); }, nullptr, nullptr},
-   /* Reacción al sonido (OUT del MAX9814); umbral fino con SensMic en RainMaker y pin GAÍN del módulo. */
-   {"Musica", [] { cinta->setReaccionSonido(true); cinta->encender(); }, nullptr, nullptr},
-   {"SinMusica", [] { cinta->setReaccionSonido(false); }, nullptr, nullptr},
 
 };
 
@@ -315,8 +279,8 @@ void GuardarConfigBool(String label, bool valor) {
    prefs->end();
 }
 
-/** Cada encendido “físico” suma 1; si llega a kRepisaPwrCyclesParaFabrica → RMakerFactoryReset.
- * Si la repisa queda encendida más de kRepisaTiempoEncendidoEstableMs, el contador vuelve a 0 (cancelar). */
+/** Cada encendido “físico” suma 1; si llega a REPISA_FACTORY_RESET_POWER_CYCLES → RMakerFactoryReset.
+ * Si la repisa queda encendida más de REPISA_FACTORY_CANCEL_STABLE_MS, el contador vuelve a 0 (cancelar). */
 static void repisaEvaluarResetPorCiclosAlimentacion() {
    const esp_reset_reason_t rr = esp_reset_reason();
    const bool esEncendidoPorCorriente =
@@ -343,10 +307,10 @@ static void repisaEvaluarResetPorCiclosAlimentacion() {
        "[Repisa] Ciclo rapido de alimentacion: %u de %u "
        "(reinicio fabrica al llegar; o deja encendida %lu s para cancelar)\n",
        seq,
-       (unsigned)kRepisaPwrCyclesParaFabrica,
-       (unsigned long)(kRepisaTiempoEncendidoEstableMs / 1000UL));
+       (unsigned)REPISA_FACTORY_RESET_POWER_CYCLES,
+       (unsigned long)(REPISA_FACTORY_CANCEL_STABLE_MS / 1000UL));
 
-   if (seq >= (unsigned)kRepisaPwrCyclesParaFabrica) {
+   if (seq >= (unsigned)REPISA_FACTORY_RESET_POWER_CYCLES) {
       prefs->begin("hw_rst", false);
       prefs->putUChar("pwrcyc", 0);
       prefs->end();
@@ -360,7 +324,7 @@ static void repisaEvaluarResetPorCiclosAlimentacion() {
 
 static void repisaCancelarContadorSiEncendidoEstable() {
    static bool hecho = false;
-   if (hecho || millis() < kRepisaTiempoEncendidoEstableMs) {
+   if (hecho || millis() < REPISA_FACTORY_CANCEL_STABLE_MS) {
       return;
    }
    hecho = true;
@@ -515,7 +479,7 @@ static void applyEscenaPreset(const char *nombre) {
    cinta->encender();
    cinta->brillo(valor_rm);
    {
-      uint32_t rgb = cinta->ws2812fx->ColorHSV(hue_rm * 182, kRepisaSaturationByte, valor_rm);
+      uint32_t rgb = cinta->ws2812fx->ColorHSV(hue_rm * 182, REPISA_COLOR_SATURATION_BYTE, valor_rm);
       cinta->color(rgb);
    }
    cinta->modo(modo);
@@ -600,7 +564,7 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
       if (hue_rm > 360) {
          hue_rm = 360;
       }
-      uint32_t color = cinta->ws2812fx->ColorHSV(hue_rm * 182, kRepisaSaturationByte, valor_rm);
+      uint32_t color = cinta->ws2812fx->ColorHSV(hue_rm * 182, REPISA_COLOR_SATURATION_BYTE, valor_rm);
       cinta->color(color);
       if (!g_aplicando_escena && luz_led) {
          luz_led->updateAndReportParam("Escena", "Personalizado");
@@ -677,7 +641,7 @@ void setup() {
    LeerConfig();
    CustomEffects::setMicSensitivityPct((uint8_t)constrain(config.SensMic, 0, 100));
 
-   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+   pinMode(REPISA_BOOT_BUTTON_PIN, INPUT_PULLUP);
 
    Param color_param("Color", ESP_RMAKER_PARAM_HUE, value((int)config.Color), PROP_FLAG_READ | PROP_FLAG_WRITE);
    Param effect_param("Efectos", ESP_RMAKER_PARAM_MODE, esp_rmaker_str(config.Efectos.c_str()), PROP_FLAG_READ | PROP_FLAG_WRITE);
@@ -690,10 +654,12 @@ void setup() {
    Param power_param("Encender", ESP_RMAKER_PARAM_POWER, value(config.Encender), PROP_FLAG_READ | PROP_FLAG_WRITE);
    Param scene_param("Escena", ESP_RMAKER_PARAM_MODE, esp_rmaker_str("Personalizado"), PROP_FLAG_READ | PROP_FLAG_WRITE);
 
-   /* Matriz 6×8 = 48 LEDs serpentina (data pin 14; cambia LPIN si hace falta). */
-   cinta = new CintaLED(14, 48, CambioCintaLed,NEO_RGB);
-#if (SOUND_SENSOR_AO_PIN >= 0)
-   cinta->setPinSonidoAnalogo(SOUND_SENSOR_AO_PIN);
+   /* Matriz 6×8: REPISA_LED_* en config.h */
+   cinta = new CintaLED(REPISA_LED_DATA_PIN, REPISA_LED_COUNT, CambioCintaLed, NEO_RGB);
+#if defined(ARDUINO_ARCH_ESP32)
+   /* INMP441: driver i2s.h + misma lógica de lectura que tu sketch (RepisaMic.cpp). */
+   repisaMicInitInmp441(REPISA_I2S_PIN_SD, REPISA_I2S_PIN_SCK, REPISA_I2S_PIN_WS);
+   cinta->setPinSonidoAnalogo(REPISA_MIC_PIN_I2S);
 #endif
 
    Node my_node = RMaker.initNode("Nodo Repisa");
@@ -762,7 +728,7 @@ void setup() {
    cinta->iniciar(config.Encender, config.Brillo, config.Color, config.Efectos.c_str());
    /* IR se arranca en loop(): no en provisión activa (IRremote vs BLE/WiFi); sin exigir WiFi conectado. */
    Serial.println("[IR]ANTES IRControlLite listo (independiente de WiFi/RainMaker; fuera de ventana de provisión).");
-   irControl = new IRControlLite(IR_RECEIVE_PIN);
+   irControl = new IRControlLite(REPISA_IR_RECEIVE_PIN);
    irControl->iniciar();
    Serial.println("[IR] IRControlLite listo (independiente de WiFi/RainMaker; fuera de ventana de provisión).");
   
@@ -859,34 +825,55 @@ static void procesarComandosSerialReset() {
    }
 }
 
+/** BOOT (GPIO0): sin while/delay — evalúa la duración solo al soltar; no bloquea animaciones ni el plotter. */
+static void repisaProcesarBootButtonNoBloqueante() {
+   static bool estaba_bajo = false;
+   static uint32_t press_start_ms = 0;
+
+   const bool bajo = (digitalRead(REPISA_BOOT_BUTTON_PIN) == LOW);
+
+   if (bajo && !estaba_bajo) {
+      press_start_ms = millis();
+      estaba_bajo = true;
+      return;
+   }
+   if (!bajo && estaba_bajo) {
+      estaba_bajo = false;
+      const uint32_t dur = millis() - press_start_ms;
+      if (dur < 80U) {
+         return;
+      }
+      if (dur > 10000U) {
+         Serial.println(F("Reset to factory."));
+         repisaLimpiarFlagEscenasRainMakerSeed();
+         RMakerFactoryReset(2);
+      } else if (dur > 3000U) {
+         Serial.println(F("Reset Wi-Fi."));
+         RMakerWiFiReset(2);
+      }
+   }
+}
+
 void loop() {
    repisaCancelarContadorSiEncendidoEstable();
    procesarComandosSerialReset();
 
+#if defined(ARDUINO_ARCH_ESP32) && REPISA_MIC_SERIAL_PLOTTER
+   repisaMicSerialPlotterTick(); /* solo imprime soundLevel; no i2s_read */
+#endif
+
    if (irControl) {
       irControl->procesar();
    }
+
    yield();
    if (cinta) {
       cinta->procesar();
    }
+
    probarConexion();
 
-   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-      delay(100);
-      int startTime = millis();
-      while (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-         delay(50);
-      }
-      int endTime = millis();
-      if ((endTime - startTime) > 10000) {
-         Serial.printf("Reset to factory.\n");
-         repisaLimpiarFlagEscenasRainMakerSeed();
-         RMakerFactoryReset(2);
-      } else if ((endTime - startTime) > 3000) {
-         Serial.printf("Reset Wi-Fi.\n");
-         RMakerWiFiReset(2);
-      }
-   }
+   repisaProcesarBootButtonNoBloqueante();
+
    yield();
 }
